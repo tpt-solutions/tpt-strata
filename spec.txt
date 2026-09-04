@@ -1,0 +1,70 @@
+# tpt-strata — Design Spec
+
+**Category:** Embeddable columnar query engine
+**Status:** Conditional — build only if a concrete ease-of-use case validates against the current state of the ecosystem
+**Suggested license:** MIT / Apache-2.0 dual
+
+---
+
+## 1. What this fills
+
+tpt-keystone-db, tpt-aion, and tpt-cloud-observability all need the same thing: a way to run analytical, columnar queries over embedded data without pulling in a JVM, a server process, or a large external trait hierarchy just to answer "sum this column grouped by that one." There isn't currently a lightweight option in this stack that:
+
+- embeds cleanly as a library, with no separate process or client/server boundary
+- exposes a builder-style API that goes from "here's my data" to "here's my answer" without requiring the caller to implement execution-plan traits for common cases
+- gives diagnostics that describe the actual problem (a type mismatch, a missing column, an unsupported cast) instead of surfacing internal plan-node names
+- integrates with tpt-keystone-db's native types directly, without a translation layer in the common path
+- ships under a license the rest of this ecosystem can use without carve-outs
+
+tpt-strata is that library: a small, independent, embeddable columnar query engine, built to be dropped into the tools that need one.
+
+## 2. Non-negotiables
+
+- **The core execution engine and its native columnar format are independent.** They are not built on top of, or wire-compatible with, any external in-memory columnar standard. This keeps the dependency surface small and keeps tpt-strata's roadmap decoupled from any other project's release cadence, API churn, or governance process.
+- **Interchange is a boundary concern, not a foundation.** Reading external columnar formats (e.g., Parquet) in and emitting interchange-format record batches out is handled by a dedicated import/export bridge, isolated from the core crate. This bridge is the only place an external columnar interop dependency is allowed to appear, and it exists so results can flow into PyArrow, existing BI tooling, or anything else that expects that interchange shape — not because the engine is built around it.
+- **Diagnostics are a first-class feature, not an afterthought.** Every error surfaced to a caller should name the actual problem in terms the caller used (their column names, their types), not an internal plan-node identifier.
+
+## 3. What "meaningfully easier" has to mean
+
+This project is not justified by licensing alone. It's justified only if it's a real usability win over the Apache-only incumbent it displaces in this stack's dependency tree, and that has to be demonstrated, not assumed:
+
+- **Basic SQL-over-files should require zero trait implementations.** The incumbent's real friction shows up the moment you need anything beyond that — a custom data source, a custom scalar function, a non-standard execution step — at which point you're implementing large, still-evolving internal interfaces against a moving API surface.
+- **Compile times and error messages should not punish newcomers.** A misconfigured query should produce a message about the query, not a wall of trait-bound errors.
+- **Integration with tpt-keystone-db's own types should be boilerplate-free.** No manual schema mirroring, no conversion shims required for the common path.
+
+Before real implementation time is committed, this thesis gets validated against the incumbent's *current* state (not a remembered or outdated impression of it). If basic embedding turns out to already be simple, or if the ergonomics gap has closed, that's a reason not to build this — the license difference by itself is not sufficient justification.
+
+## 4. Scope
+
+**In scope for v1:**
+- Native columnar in-memory format and execution engine
+- Builder API for constructing and running queries without trait implementation
+- SQL surface covering common analytical patterns (filter, project, aggregate, join, sort, limit)
+- Native, boilerplate-free integration with tpt-keystone-db types
+- Import bridge: read Parquet into tpt-strata's native format
+- Export bridge: emit results in an external interchange format for downstream tools that require it
+- Diagnostics layer with user-facing error messages tied to caller-supplied schema
+
+**Out of scope for v1:**
+- Wire-level compatibility with any external columnar standard as a core dependency
+- Distributed/multi-node execution
+- A general-purpose plugin system matching the incumbent's extensibility surface — only as much extensibility as the common cases require
+
+## 5. How it plugs in
+
+| Consumer | Use |
+|---|---|
+| tpt-keystone-db | Native, in-process analytical queries over stored data without a translation layer |
+| tpt-aion | Embedded columnar analytics without standing up a separate query service |
+| tpt-cloud-observability | Ad hoc and scheduled aggregation queries over collected metrics/log data |
+
+## 6. Open questions before committing
+
+1. Run the "point at data, get an answer" case against the incumbent's current release — how many lines, how much trait implementation, actually required today?
+2. What does a real diagnostic comparison look like — same broken query, both engines, compare the error text a caller actually sees?
+3. What's the minimal viable bridge surface — does v1 need export, or can that wait until a consumer actually needs it?
+4. Does tpt-keystone-db's type system have any shapes (nested, variant, etc.) that would make "boilerplate-free integration" hard to keep true past v1?
+
+## 7. Decision criterion
+
+Build tpt-strata if and only if the ease-of-use validation in Section 3 comes back positive. If it doesn't, don't build it — a relicensed, less-mature copy of an existing engine isn't worth maintaining on its own.
