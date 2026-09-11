@@ -165,3 +165,88 @@ the benchmark numbers.
 - [ ] Announce availability to prospective in-house consumers
 
 **Milestone:** tpt-strata v1.0.0 is published and usable as a dependency.
+
+## Phase 10 — Post-1.0.1 Review Findings
+
+> Source: platform review (bugs/todos/missing features/adoption audit),
+> 2026-09-12. See conversation/plan for full detail on each item.
+
+### Bugs
+
+- [ ] Fix `ORDER BY` silently mishandling `NULL`: `scalar_cmp`
+      (`types.rs:79-89`) returns `Equal` for any incomparable pair,
+      including `NULL` vs. a value. MIN/MAX already guard against this
+      (`engine.rs:286`, `:308`) but the `SortExec` comparator
+      (`engine.rs:721`) does not, so nulls land in arbitrary sort positions
+      with no diagnostic. Decide NULLS FIRST vs. LAST, fix, add a
+      regression test in `tests/fixes.rs`.
+- [ ] Add MIN/MAX type-validation diagnostic mirroring the numeric-only
+      guard SUM/AVG already has (`engine.rs:460-472`), so unorderable
+      inputs get a named diagnostic instead of falling through to
+      `scalar_cmp`'s silent-equal fallback.
+- [ ] Harden/annotate fragile `.expect()` calls that rely on invariants
+      enforced elsewhere: `sql.rs:1134` (wildcard expansion), `format.rs:289`
+      (equal column lengths). Add a comment naming the invariant, or a
+      `debug_assert!`.
+- [ ] Clarify `error.rs:60-65` (`unsupported_format`) as an internal
+      "should never happen" path (rename or `debug_assert!`) rather than a
+      caller-facing diagnostic with a raw `{:?}` dump.
+
+### Adoption / examples (highest leverage, no design risk)
+
+- [ ] Add `crates/tpt-strata/examples/basic_query.rs` — builder API
+      end-to-end.
+- [ ] Add `crates/tpt-strata/examples/sql_query.rs` — `SqlContext`
+      end-to-end.
+- [ ] Add `crates/tpt-strata/examples/diagnostics.rs` — deliberately trigger
+      each `QueryError` variant and print it (diagnostics is a headline
+      feature with zero example coverage today).
+- [ ] Add `crates/tpt-strata-parquet/examples/read_parquet.rs` — the
+      Parquet bridge currently has no example and no doctest at all.
+- [ ] Add crates.io/docs.rs/CI/license badges to README.md.
+- [ ] Surface a condensed (3-row) version of the DataFusion comparison
+      (deps, compile time, error clarity) directly in README.md, not just
+      `validation-memo.md`/`docs/benchmarks.md`.
+- [ ] Replace SECURITY.md's "email the maintainers" with a real contact or
+      advisory link.
+- [ ] Write a short integration "recipe" doc/template for wiring
+      tpt-strata into a struct-backed store, aimed at the three known
+      consumers (tpt-keystone-db, tpt-aion, tpt-cloud-observability).
+
+### Missing SQL features (scope as a deliberate v1.1 decision, not bugs)
+
+- [ ] `OR` in `WHERE` (only `AND`-chains supported today, `sql.rs:9`,
+      `:686-693`)
+- [ ] `IS NULL` / `IS NOT NULL`
+- [ ] `IN (...)` and `BETWEEN`
+- [ ] Parentheses / operator precedence in `WHERE`
+- [ ] `LIKE`, `DISTINCT`, `HAVING`
+- [ ] Multiple `JOIN`s per query; LEFT/OUTER join (today: single inner
+      equi-join only, `engine.rs:557-670`)
+- [ ] Column-to-column comparisons in `WHERE` (today: column-vs-literal
+      only)
+
+### Missing data types
+
+- [ ] Evaluate adding `Date`/`Timestamp` (most Parquet-relevant gap) —
+      check tpt-cloud-observability's actual schema needs first.
+- [ ] Evaluate `Decimal`; lower priority: `Int8`/`Int16`, unsigned ints,
+      `Float32`, `Binary`.
+
+### Documentation
+
+- [ ] Note in ARCHITECTURE.md that Sort/Join fully materialize in memory
+      (no streaming/spill), so consumers don't assume otherwise.
+
+### Innovative / forward-looking (optional, gauge consumer demand first)
+
+- [ ] `Table::from_rows`-style row-oriented convenience constructor
+      alongside `Table::try_new`.
+- [ ] `EXPLAIN`-style plan-printing function using the existing diagnostics
+      infrastructure.
+- [ ] Roadmap line for a minimal streaming/incremental aggregation mode,
+      given tpt-cloud-observability is a named consumer.
+
+**Milestone:** Known bugs from the post-1.0.1 review are fixed, an
+`examples/` surface exists for both crates, and SQL/type-gap decisions are
+made deliberately rather than by omission.
