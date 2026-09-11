@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-strata"
+homepage = "https://github.com/tpt-solutions/tpt-strata"
+keywords = ["columnar", "query-engine", "analytics", "embeddable", "sql"]
+categories = ["database", "parser-implementations", "compilers"]
+
+[workspace.dependencies]
+parquet = { version = "55", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "flate2"] }

@@ -1,0 +1,23 @@
+[package]
+name = "tpt-strata-parquet"
+description = "Parquet import bridge for tpt-strata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/tpt-strata-parquet"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+tpt-strata = { path = "../tpt-strata" }
+parquet = { workspace = true }
+arrow = { version = "55", default-features = false }

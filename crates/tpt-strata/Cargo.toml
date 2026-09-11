@@ -1,0 +1,25 @@
+[package]
+name = "tpt-strata"
+description = "Embeddable columnar query engine with zero external dependencies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/tpt-strata"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# Zero external dependencies — this is a non-negotiable.
+
+[[bench]]
+name = "queries"
+harness = false
