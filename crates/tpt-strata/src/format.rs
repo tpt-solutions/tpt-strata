@@ -75,6 +75,22 @@ impl Table {
                     ),
                 })?;
 
+            for v in col.values.iter().filter(|v| !matches!(v, Scalar::Null)) {
+                if v.type_name() != data_type.name() {
+                    return Err(QueryError::TypeMismatch {
+                        column: col.name.clone(),
+                        expected: data_type.name(),
+                        actual: v.type_name(),
+                        context: format!(
+                            "column '{}' contains a mix of {} and {} values; each column must have a single type",
+                            col.name,
+                            data_type.name(),
+                            v.type_name()
+                        ),
+                    });
+                }
+            }
+
             let nullable = col.values.iter().any(|v| matches!(v, Scalar::Null));
             fields.push(Field::new(col.name.clone(), data_type, nullable));
             arrays.push(value_to_array(data_type, &col.values)?);

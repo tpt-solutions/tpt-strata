@@ -37,10 +37,14 @@ const SUPPORTED_AGGS: &str = "SUM, COUNT, MIN, MAX, AVG";
 #[derive(Debug, Clone, PartialEq)]
 enum ProjectionItem {
     Wild,
-    Column(String),
+    Column {
+        name: String,
+        alias: Option<String>,
+    },
     Aggregate {
         func: AggFunc,
         column: Option<String>,
+        alias: Option<String>,
     },
 }
 
@@ -157,87 +161,129 @@ fn sql_err(message: impl Into<String>) -> QueryError {
     }
 }
 
-fn lex(input: &str) -> Result<Vec<Tok>, QueryError> {
+/// Convert a character offset into a rendered diagnostic with line/column and
+/// a caret pointing at the offending character.
+fn sql_err_at(source: &str, offset: usize, message: impl Into<String>) -> QueryError {
+    let (line, col) = line_col(source, offset);
+    let mut rendered = format!("{} at line {line}, column {col}", message.into());
+    if let Some(line_text) = source.lines().nth(line - 1) {
+        rendered.push_str(&format!(
+            "\n  {line_text}\n  {}^",
+            " ".repeat(col.saturating_sub(1))
+        ));
+    }
+    QueryError::Sql { message: rendered }
+}
+
+fn line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.chars().enumerate() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn lex(input: &str) -> Result<(Vec<Tok>, Vec<usize>), QueryError> {
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
     let mut toks = Vec::new();
+    let mut posns = Vec::new();
+
+    let mut push = |p: usize, t: Tok| {
+        posns.push(p);
+        toks.push(t);
+    };
 
     while i < chars.len() {
         let c = chars[i];
         match c {
             ' ' | '\t' | '\r' | '\n' => i += 1,
             '(' => {
-                toks.push(Tok::LParen);
+                push(i, Tok::LParen);
                 i += 1;
             }
             ')' => {
-                toks.push(Tok::RParen);
+                push(i, Tok::RParen);
                 i += 1;
             }
             ',' => {
-                toks.push(Tok::Comma);
+                push(i, Tok::Comma);
                 i += 1;
             }
             '.' => {
-                toks.push(Tok::Dot);
+                push(i, Tok::Dot);
                 i += 1;
             }
             '*' => {
-                toks.push(Tok::Star);
+                push(i, Tok::Star);
                 i += 1;
             }
             ';' => {
-                toks.push(Tok::Semi);
+                push(i, Tok::Semi);
                 i += 1;
             }
             '=' => {
-                toks.push(Tok::Eq);
+                push(i, Tok::Eq);
                 i += 1;
             }
             '!' => {
                 if chars.get(i + 1) == Some(&'=') {
-                    toks.push(Tok::NotEq);
+                    push(i, Tok::NotEq);
                     i += 2;
                 } else {
-                    return Err(sql_err(format!(
-                        "unexpected '!' at position {i}; use '!=' or '<>'"
-                    )));
+                    return Err(sql_err_at(
+                        input,
+                        i,
+                        format!("unexpected '!' at position {i}; use '!=' or '<>'"),
+                    ));
                 }
             }
             '<' => match chars.get(i + 1) {
                 Some('=') => {
-                    toks.push(Tok::Lte);
+                    push(i, Tok::Lte);
                     i += 2;
                 }
                 Some('>') => {
-                    toks.push(Tok::NotEq);
+                    push(i, Tok::NotEq);
                     i += 2;
                 }
                 _ => {
-                    toks.push(Tok::Lt);
+                    push(i, Tok::Lt);
                     i += 1;
                 }
             },
             '>' => match chars.get(i + 1) {
                 Some('=') => {
-                    toks.push(Tok::Gte);
+                    push(i, Tok::Gte);
                     i += 2;
                 }
                 _ => {
-                    toks.push(Tok::Gt);
+                    push(i, Tok::Gt);
                     i += 1;
                 }
             },
             '-' => {
-                toks.push(Tok::Minus);
+                push(i, Tok::Minus);
                 i += 1;
             }
             '\'' => {
+                let start = i;
                 let mut s = String::new();
                 i += 1;
                 loop {
                     match chars.get(i) {
-                        None => return Err(sql_err("unterminated string literal")),
+                        None => {
+                            return Err(sql_err_at(input, start, "unterminated string literal"))
+                        }
                         Some('\'') => {
                             if chars.get(i + 1) == Some(&'\'') {
                                 s.push('\'');
@@ -253,14 +299,17 @@ fn lex(input: &str) -> Result<Vec<Tok>, QueryError> {
                         }
                     }
                 }
-                toks.push(Tok::StrLit(s));
+                push(start, Tok::StrLit(s));
             }
             '"' => {
+                let start = i;
                 let mut s = String::new();
                 i += 1;
                 loop {
                     match chars.get(i) {
-                        None => return Err(sql_err("unterminated quoted identifier")),
+                        None => {
+                            return Err(sql_err_at(input, start, "unterminated quoted identifier"))
+                        }
                         Some('"') => {
                             i += 1;
                             break;
@@ -271,7 +320,7 @@ fn lex(input: &str) -> Result<Vec<Tok>, QueryError> {
                         }
                     }
                 }
-                toks.push(Tok::Ident(s));
+                push(start, Tok::Ident(s));
             }
             ch if ch.is_ascii_digit() => {
                 let start = i;
@@ -290,15 +339,15 @@ fn lex(input: &str) -> Result<Vec<Tok>, QueryError> {
                 }
                 let text: String = chars[start..i].iter().collect();
                 if is_float {
-                    let n: f64 = text
-                        .parse()
-                        .map_err(|_| sql_err(format!("invalid number '{text}'")))?;
-                    toks.push(Tok::Number(n));
+                    let n: f64 = text.parse().map_err(|_| {
+                        sql_err_at(input, start, format!("invalid number '{text}'"))
+                    })?;
+                    push(start, Tok::Number(n));
                 } else {
-                    let n: i64 = text
-                        .parse()
-                        .map_err(|_| sql_err(format!("integer out of range '{text}'")))?;
-                    toks.push(Tok::Int(n));
+                    let n: i64 = text.parse().map_err(|_| {
+                        sql_err_at(input, start, format!("integer out of range '{text}'"))
+                    })?;
+                    push(start, Tok::Int(n));
                 }
             }
             ch if ch.is_alphabetic() || ch == '_' => {
@@ -308,47 +357,64 @@ fn lex(input: &str) -> Result<Vec<Tok>, QueryError> {
                 }
                 let text: String = chars[start..i].iter().collect();
                 let upper = text.to_ascii_uppercase();
-                toks.push(match upper.as_str() {
-                    "SELECT" => Tok::Select,
-                    "FROM" => Tok::From,
-                    "WHERE" => Tok::Where,
-                    "GROUP" => Tok::Group,
-                    "BY" => Tok::By,
-                    "ORDER" => Tok::Order,
-                    "ASC" => Tok::Asc,
-                    "DESC" => Tok::Desc,
-                    "LIMIT" => Tok::Limit,
-                    "JOIN" => Tok::Join,
-                    "ON" => Tok::On,
-                    "AND" => Tok::And,
-                    "AS" => Tok::As,
-                    "TRUE" => Tok::True,
-                    "FALSE" => Tok::False,
-                    "NULL" => Tok::Null,
-                    _ => Tok::Ident(text),
-                });
+                push(
+                    start,
+                    match upper.as_str() {
+                        "SELECT" => Tok::Select,
+                        "FROM" => Tok::From,
+                        "WHERE" => Tok::Where,
+                        "GROUP" => Tok::Group,
+                        "BY" => Tok::By,
+                        "ORDER" => Tok::Order,
+                        "ASC" => Tok::Asc,
+                        "DESC" => Tok::Desc,
+                        "LIMIT" => Tok::Limit,
+                        "JOIN" => Tok::Join,
+                        "ON" => Tok::On,
+                        "AND" => Tok::And,
+                        "AS" => Tok::As,
+                        "TRUE" => Tok::True,
+                        "FALSE" => Tok::False,
+                        "NULL" => Tok::Null,
+                        _ => Tok::Ident(text),
+                    },
+                );
             }
             other => {
-                return Err(sql_err(format!(
-                    "unexpected character '{other}' at position {i}"
-                )));
+                return Err(sql_err_at(
+                    input,
+                    i,
+                    format!("unexpected character '{other}' at position {i}"),
+                ));
             }
         }
     }
-    toks.push(Tok::End);
-    Ok(toks)
+    push(i, Tok::End);
+    Ok((toks, posns))
 }
 
 // === Parser ===
 
 struct Parser {
     toks: Vec<Tok>,
+    posns: Vec<usize>,
+    source: String,
     pos: usize,
 }
 
 impl Parser {
-    fn new(toks: Vec<Tok>) -> Self {
-        Self { toks, pos: 0 }
+    fn new(toks: Vec<Tok>, posns: Vec<usize>, source: String) -> Self {
+        Self {
+            toks,
+            posns,
+            source,
+            pos: 0,
+        }
+    }
+
+    fn perr(&self, message: impl Into<String>) -> QueryError {
+        let offset = self.posns.get(self.pos).copied().unwrap_or(0);
+        sql_err_at(&self.source, offset, message)
     }
 
     fn peek(&self) -> &Tok {
@@ -377,7 +443,7 @@ impl Parser {
             self.next();
             Ok(())
         } else {
-            Err(sql_err(format!(
+            Err(self.perr(format!(
                 "expected '{}' but found '{}'",
                 tok.describe(),
                 self.peek().describe()
@@ -385,7 +451,6 @@ impl Parser {
         }
     }
 
-    /// Parse a possibly-qualified column reference `name` or `table.name`.
     fn parse_column(&mut self) -> Result<String, QueryError> {
         let first = match self.peek().clone() {
             Tok::Ident(s) => {
@@ -393,7 +458,7 @@ impl Parser {
                 s
             }
             other => {
-                return Err(sql_err(format!(
+                return Err(self.perr(format!(
                     "expected a column name but found '{}'",
                     other.describe()
                 )));
@@ -406,7 +471,7 @@ impl Parser {
                     s
                 }
                 other => {
-                    return Err(sql_err(format!(
+                    return Err(self.perr(format!(
                         "expected a column name after '.' but found '{}'",
                         other.describe()
                     )));
@@ -423,9 +488,9 @@ impl Parser {
             return Ok(ProjectionItem::Wild);
         }
         let name = self.parse_column()?;
-        let item = if self.accept(Tok::LParen) {
+        let mut item = if self.accept(Tok::LParen) {
             if name.eq_ignore_ascii_case("CAST") {
-                return Err(sql_err(
+                return Err(self.perr(
                     "unsupported cast: tpt-strata v1 has no CAST support; provide values in the target type directly",
                 ));
             }
@@ -442,22 +507,31 @@ impl Parser {
                 "MAX" => AggFunc::Max,
                 "AVG" => AggFunc::Avg,
                 other => {
-                    return Err(sql_err(format!(
+                    return Err(self.perr(format!(
                         "unsupported function '{other}' in SELECT; supported: {SUPPORTED_AGGS}"
                     )));
                 }
             };
-            ProjectionItem::Aggregate { func, column }
+            ProjectionItem::Aggregate {
+                func,
+                column,
+                alias: None,
+            }
         } else {
-            ProjectionItem::Column(name)
+            ProjectionItem::Column { name, alias: None }
         };
         if self.accept(Tok::As) {
             match self.peek().clone() {
-                Tok::Ident(_) => {
+                Tok::Ident(a) => {
                     self.next();
+                    match &mut item {
+                        ProjectionItem::Column { alias, .. } => *alias = Some(a),
+                        ProjectionItem::Aggregate { alias, .. } => *alias = Some(a),
+                        ProjectionItem::Wild => {}
+                    }
                 }
                 other => {
-                    return Err(sql_err(format!(
+                    return Err(self.perr(format!(
                         "expected an alias name after AS but found '{}'",
                         other.describe()
                     )));
@@ -467,7 +541,6 @@ impl Parser {
         Ok(item)
     }
 
-    /// Parse a column name or an aggregate expression in an ORDER BY clause.
     fn parse_order_by_expr(&mut self) -> Result<String, QueryError> {
         let word = match self.peek().clone() {
             Tok::Ident(s) => {
@@ -475,7 +548,7 @@ impl Parser {
                 s
             }
             other => {
-                return Err(sql_err(format!(
+                return Err(self.perr(format!(
                     "expected a column name in ORDER BY but found '{}'",
                     other.describe()
                 )));
@@ -491,7 +564,7 @@ impl Parser {
             let func = word.to_ascii_uppercase();
             match func.as_str() {
                 "SUM" | "COUNT" | "MIN" | "MAX" | "AVG" => Ok(format!("{func}({inner})")),
-                _ => Err(sql_err(format!(
+                _ => Err(self.perr(format!(
                     "unsupported aggregate function '{func}' in ORDER BY; supported: {SUPPORTED_AGGS}"
                 ))),
             }
@@ -508,30 +581,30 @@ impl Parser {
             Tok::Number(n) => Scalar::F64(if neg { -n } else { n }),
             Tok::StrLit(s) => {
                 if neg {
-                    return Err(sql_err("cannot negate a string literal"));
+                    return Err(self.perr("cannot negate a string literal"));
                 }
                 Scalar::Str(s)
             }
             Tok::True => {
                 if neg {
-                    return Err(sql_err("cannot negate TRUE"));
+                    return Err(self.perr("cannot negate TRUE"));
                 }
                 Scalar::Bool(true)
             }
             Tok::False => {
                 if neg {
-                    return Err(sql_err("cannot negate FALSE"));
+                    return Err(self.perr("cannot negate FALSE"));
                 }
                 Scalar::Bool(false)
             }
             Tok::Null => {
                 if neg {
-                    return Err(sql_err("cannot negate NULL"));
+                    return Err(self.perr("cannot negate NULL"));
                 }
                 Scalar::Null
             }
             other => {
-                return Err(sql_err(format!(
+                return Err(self.perr(format!(
                     "expected a literal value but found '{}'",
                     other.describe()
                 )));
@@ -550,7 +623,7 @@ impl Parser {
             Tok::Lt => Comparison::Lt,
             Tok::Lte => Comparison::Lte,
             other => {
-                return Err(sql_err(format!(
+                return Err(self.perr(format!(
                     "expected a comparison operator but found '{}'",
                     other.describe()
                 )));
@@ -578,7 +651,7 @@ impl Parser {
                 Some(s)
             }
             other => {
-                return Err(sql_err(format!(
+                return Err(self.perr(format!(
                     "expected a table name after FROM but found '{}'",
                     other.describe()
                 )));
@@ -593,7 +666,7 @@ impl Parser {
                     s
                 }
                 other => {
-                    return Err(sql_err(format!(
+                    return Err(self.perr(format!(
                         "expected a table name after JOIN but found '{}'",
                         other.describe()
                     )));
@@ -648,13 +721,13 @@ impl Parser {
             match self.peek().clone() {
                 Tok::Int(n) => {
                     if n < 0 {
-                        return Err(sql_err("LIMIT requires a non-negative integer"));
+                        return Err(self.perr("LIMIT requires a non-negative integer"));
                     }
                     limit = Some(n as usize);
                     self.next();
                 }
                 other => {
-                    return Err(sql_err(format!(
+                    return Err(self.perr(format!(
                         "expected an integer after LIMIT but found '{}'",
                         other.describe()
                     )));
@@ -664,7 +737,7 @@ impl Parser {
 
         self.accept(Tok::Semi);
         if *self.peek() != Tok::End {
-            return Err(sql_err(format!(
+            return Err(self.perr(format!(
                 "unexpected trailing input '{}'",
                 self.peek().describe()
             )));
@@ -686,8 +759,8 @@ fn parse_sql(sql: &str) -> Result<Select, QueryError> {
     if sql.trim().is_empty() {
         return Err(sql_err("empty query"));
     }
-    let toks = lex(sql)?;
-    let mut parser = Parser::new(toks);
+    let (toks, posns) = lex(sql)?;
+    let mut parser = Parser::new(toks, posns, sql.to_string());
     parser.parse_select()
 }
 
@@ -714,10 +787,7 @@ fn apply_sort(
     desc: bool,
 ) -> Result<Arc<dyn PhysicalPlan>, QueryError> {
     let schema = plan.schema();
-    let idx = schema
-        .index_of(col)
-        .or_else(|| schema.fields.iter().position(|f| f.name.contains(col)));
-    match idx {
+    match schema.index_of(col) {
         Some(i) => Ok(Arc::new(SortExec::new(
             plan,
             vec![SortExpr { column: i, desc }],
@@ -928,7 +998,12 @@ impl<'a> SqlContext<'a> {
 
             let mut aggregates: Vec<Aggregate> = Vec::new();
             for p in &sel.projections {
-                if let ProjectionItem::Aggregate { func, column } = p {
+                if let ProjectionItem::Aggregate {
+                    func,
+                    column,
+                    alias: _,
+                } = p
+                {
                     let (col_idx, out_name) = match column {
                         None => (0usize, format!("{func}(*)")),
                         Some(c) => {
@@ -940,13 +1015,14 @@ impl<'a> SqlContext<'a> {
                         func: to_engine_func(*func),
                         column: col_idx,
                         out_name,
+                        count_star: matches!(*func, AggFunc::Count) && column.is_none(),
                     });
                 }
             }
 
             for p in &sel.projections {
-                if let ProjectionItem::Column(c) = p {
-                    let base = unqualified(c).to_string();
+                if let ProjectionItem::Column { name, .. } = p {
+                    let base = unqualified(name).to_string();
                     let grouped = sel.group_by.iter().any(|g| unqualified(g) == base);
                     if !grouped {
                         return Err(QueryError::UnsupportedOperation {
@@ -984,10 +1060,10 @@ impl<'a> SqlContext<'a> {
                 let mut exprs = Vec::new();
                 let mut names = Vec::new();
                 for p in &sel.projections {
-                    if let ProjectionItem::Column(c) = p {
-                        let idx = resolve_in(&proj_schema, c)?;
+                    if let ProjectionItem::Column { name, .. } = p {
+                        let idx = resolve_in(&proj_schema, name)?;
                         exprs.push(Expr { column: idx });
-                        names.push(unqualified(c).to_string());
+                        names.push(unqualified(name).to_string());
                     }
                 }
                 if !exprs.is_empty() {
@@ -1027,8 +1103,8 @@ fn build_final_projection(
     let mut names = Vec::new();
     for p in projections {
         match p {
-            ProjectionItem::Column(c) => {
-                let base = unqualified(c).to_string();
+            ProjectionItem::Column { name, .. } => {
+                let base = unqualified(name).to_string();
                 let idx = schema
                     .index_of(&base)
                     .ok_or_else(|| QueryError::MissingColumn {
@@ -1038,7 +1114,7 @@ fn build_final_projection(
                 exprs.push(Expr { column: idx });
                 names.push(base);
             }
-            ProjectionItem::Aggregate { func, column } => {
+            ProjectionItem::Aggregate { func, column, .. } => {
                 let out_name = match column {
                     None => format!("{func}(*)"),
                     Some(c) => format!("{func}({c})"),

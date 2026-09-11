@@ -227,6 +227,9 @@ pub struct Aggregate {
     pub func: AggFunc,
     pub column: usize,
     pub out_name: String,
+    /// Whether `COUNT(*)` semantics apply: count every row, including nulls.
+    /// `false` means `COUNT(col)`, which skips null values.
+    pub count_star: bool,
 }
 
 trait Accumulator: Send + Sync {
@@ -236,26 +239,35 @@ trait Accumulator: Send + Sync {
 
 struct SumAcc {
     acc: f64,
+    saw: bool,
 }
 
 impl Accumulator for SumAcc {
     fn add(&mut self, value: Scalar) {
         if let Some(v) = value.as_f64() {
             self.acc += v;
+            self.saw = true;
         }
     }
     fn finish(&self) -> Scalar {
-        Scalar::F64(self.acc)
+        if self.saw {
+            Scalar::F64(self.acc)
+        } else {
+            Scalar::Null
+        }
     }
 }
 
 struct CountAcc {
     n: i64,
+    count_star: bool,
 }
 
 impl Accumulator for CountAcc {
-    fn add(&mut self, _value: Scalar) {
-        self.n += 1;
+    fn add(&mut self, value: Scalar) {
+        if self.count_star || !matches!(value, Scalar::Null) {
+            self.n += 1;
+        }
     }
     fn finish(&self) -> Scalar {
         Scalar::I64(self.n)
@@ -326,10 +338,16 @@ impl Accumulator for AvgAcc {
     }
 }
 
-fn new_accumulator(func: AggFunc) -> Box<dyn Accumulator> {
-    match func {
-        AggFunc::Sum => Box::new(SumAcc { acc: 0.0 }),
-        AggFunc::Count => Box::new(CountAcc { n: 0 }),
+fn new_accumulator(agg: &Aggregate) -> Box<dyn Accumulator> {
+    match agg.func {
+        AggFunc::Sum => Box::new(SumAcc {
+            acc: 0.0,
+            saw: false,
+        }),
+        AggFunc::Count => Box::new(CountAcc {
+            n: 0,
+            count_star: agg.count_star,
+        }),
         AggFunc::Min => Box::new(MinAcc { min: None }),
         AggFunc::Max => Box::new(MaxAcc { max: None }),
         AggFunc::Avg => Box::new(AvgAcc { sum: 0.0, n: 0 }),
@@ -433,6 +451,25 @@ impl AggregateExec {
             fields.push(Field::new(f.name.clone(), f.data_type, f.nullable));
         }
         for agg in &aggregates {
+            let f = input_schema
+                .field(agg.column)
+                .ok_or_else(|| QueryError::MissingColumn {
+                    column: format!("index {}", agg.column),
+                    available: vec![],
+                })?;
+            if matches!(agg.func, AggFunc::Sum | AggFunc::Avg)
+                && !matches!(
+                    f.data_type,
+                    DataType::Int32 | DataType::Int64 | DataType::Float64
+                )
+            {
+                return Err(QueryError::UnsupportedOperation {
+                    message: format!(
+                        "aggregate '{}' requires a numeric column; column '{}' has type {}",
+                        agg.out_name, f.name, f.data_type
+                    ),
+                });
+            }
             fields.push(Field::new(
                 agg.out_name.clone(),
                 aggregate_output_type(input_schema, agg),
@@ -470,10 +507,7 @@ impl PhysicalPlan for AggregateExec {
             for row in 0..batch.row_count() {
                 let key = self.group_key(batch, row);
                 let accs = groups.entry(key).or_insert_with(|| {
-                    self.aggregates
-                        .iter()
-                        .map(|a| new_accumulator(a.func))
-                        .collect()
+                    self.aggregates.iter().map(|a| new_accumulator(a)).collect()
                 });
                 for (i, agg) in self.aggregates.iter().enumerate() {
                     let value = batch.columns[agg.column].get(row).unwrap_or(Scalar::Null);
@@ -485,12 +519,9 @@ impl PhysicalPlan for AggregateExec {
         if self.group_by.is_empty() {
             // Global aggregation: a single output row (even over zero rows).
             let key = Vec::new();
-            let accs = groups.entry(key).or_insert_with(|| {
-                self.aggregates
-                    .iter()
-                    .map(|a| new_accumulator(a.func))
-                    .collect()
-            });
+            let accs = groups
+                .entry(key)
+                .or_insert_with(|| self.aggregates.iter().map(|a| new_accumulator(a)).collect());
             let mut columns: Vec<ArrayRef> = Vec::new();
             for (i, agg) in self.aggregates.iter().enumerate() {
                 let dt = aggregate_output_type(self.input.schema(), agg);
@@ -576,6 +607,9 @@ impl PhysicalPlan for JoinExec {
                 let key = batch.columns[self.right_key]
                     .get(row)
                     .unwrap_or(Scalar::Null);
+                if matches!(key, Scalar::Null) {
+                    continue;
+                }
                 right_index.entry(key).or_default().push((bi, row));
             }
         }
@@ -588,6 +622,9 @@ impl PhysicalPlan for JoinExec {
             }
             for row in 0..lb.row_count() {
                 let key = lb.columns[self.left_key].get(row).unwrap_or(Scalar::Null);
+                if matches!(key, Scalar::Null) {
+                    continue;
+                }
                 if let Some(matches) = right_index.get(&key) {
                     for &(rbi, rrow) in matches {
                         left_rows.push((lbi, row));

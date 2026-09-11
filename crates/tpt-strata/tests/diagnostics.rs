@@ -74,7 +74,7 @@ fn snapshot_unsupported_cast_sql() {
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "SQL error: unsupported cast: tpt-strata v1 has no CAST support; provide values in the target type directly"
+        "SQL error: unsupported cast: tpt-strata v1 has no CAST support; provide values in the target type directly at line 1, column 13\n  SELECT CAST(salary AS STRING) FROM employees\n              ^"
     );
 }
 
@@ -85,7 +85,7 @@ fn snapshot_malformed_sql_missing_keyword() {
     let err = ctx().run("SELECT * employees").unwrap_err();
     assert_eq!(
         err.to_string(),
-        "SQL error: expected 'FROM' but found 'employees'"
+        "SQL error: expected 'FROM' but found 'employees' at line 1, column 10\n  SELECT * employees\n           ^"
     );
 }
 
@@ -96,7 +96,7 @@ fn snapshot_malformed_sql_bad_literal() {
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "SQL error: expected a literal value but found '='"
+        "SQL error: expected a literal value but found '=' at line 1, column 50\n  SELECT department FROM employees WHERE salary = =\n                                                   ^"
     );
 }
 
@@ -105,7 +105,7 @@ fn snapshot_malformed_sql_trailing() {
     let err = ctx().run("SELECT * FROM employees ORDER BY").unwrap_err();
     assert_eq!(
         err.to_string(),
-        "SQL error: expected a column name in ORDER BY but found 'end of input'"
+        "SQL error: expected a column name in ORDER BY but found 'end of input' at line 1, column 33\n  SELECT * FROM employees ORDER BY\n                                  ^"
     );
 }
 
@@ -118,7 +118,7 @@ fn snapshot_unsupported_function_sql() {
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "SQL error: unsupported function 'MEDIAN' in SELECT; supported: SUM, COUNT, MIN, MAX, AVG"
+        "SQL error: unsupported function 'MEDIAN' in SELECT; supported: SUM, COUNT, MIN, MAX, AVG at line 1, column 23\n  SELECT MEDIAN(salary) FROM employees\n                        ^"
     );
 }
 

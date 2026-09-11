@@ -93,11 +93,13 @@ fn aggregate_group_by_sum_count() {
                 func: tpt_strata::engine::AggFunc::Sum,
                 column: 1,
                 out_name: "SUM(salary)".into(),
+                count_star: false,
             },
             Aggregate {
                 func: tpt_strata::engine::AggFunc::Count,
                 column: 0,
                 out_name: "COUNT(department)".into(),
+                count_star: false,
             },
         ],
     )
@@ -144,6 +146,7 @@ fn aggregate_global_avg() {
             func: tpt_strata::engine::AggFunc::Avg,
             column: 1,
             out_name: "AVG(salary)".into(),
+            count_star: false,
         }],
     )
     .unwrap();
@@ -164,11 +167,13 @@ fn aggregate_min_max_preserve_source_type() {
                 func: tpt_strata::engine::AggFunc::Min,
                 column: 1,
                 out_name: "MIN(salary)".into(),
+                count_star: false,
             },
             Aggregate {
                 func: tpt_strata::engine::AggFunc::Max,
                 column: 1,
                 out_name: "MAX(salary)".into(),
+                count_star: false,
             },
         ],
     )

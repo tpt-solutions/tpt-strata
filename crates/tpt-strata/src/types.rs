@@ -64,7 +64,13 @@ impl fmt::Display for Scalar {
             Scalar::Bool(v) => write!(f, "{v}"),
             Scalar::I32(v) => write!(f, "{v}"),
             Scalar::I64(v) => write!(f, "{v}"),
-            Scalar::F64(v) => write!(f, "{v:.1}"),
+            Scalar::F64(v) => {
+                if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e16 {
+                    write!(f, "{}", *v as i64)
+                } else {
+                    write!(f, "{v}")
+                }
+            }
             Scalar::Str(v) => write!(f, "{v}"),
         }
     }

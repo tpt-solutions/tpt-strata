@@ -179,6 +179,7 @@ impl<'a> QueryBuilder<'a> {
                         func: to_engine_func(*func),
                         column: idx,
                         out_name: format!("{func}({col})"),
+                        count_star: false,
                     })
                 })
                 .collect::<Result<_, _>>()?;
@@ -199,16 +200,7 @@ impl<'a> QueryBuilder<'a> {
         if let Some((col, desc)) = self.order_by.as_ref() {
             // The order column must be resolved against the current output schema.
             let schema = plan.schema();
-            let out_idx = if let Some(i) = schema.index_of(col) {
-                Some(i)
-            } else {
-                // Allow matching against aggregate output names / suffix matches.
-                schema
-                    .fields
-                    .iter()
-                    .position(|f| f.name == *col || f.name.contains(col.as_str()))
-            };
-            if let Some(idx) = out_idx {
+            if let Some(idx) = schema.index_of(col) {
                 plan = Arc::new(SortExec::new(
                     plan,
                     vec![SortExpr {

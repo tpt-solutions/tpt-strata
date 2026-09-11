@@ -4,6 +4,27 @@ All notable changes to tpt-strata will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.0.1] - 2026-09-11
+
+### Fixed
+
+- `COUNT(col)` no longer counts `NULL` rows; `COUNT(*)` still counts every
+  row (engine-level `count_star` flag distinguishes the two).
+- `SUM`/`AVG` now return `NULL` when the column or group has no non-null
+  values, instead of `0.0` (`SUM(dept)` on a string column now fails with a
+  diagnostic naming the column and its type rather than silently returning
+  `0.0`).
+- `Table::try_new` rejects columns that mix value types (previously the
+  mismatched values were silently dropped and stored as `NULL`).
+- `ORDER BY` no longer matches columns by substring; unknown names produce a
+  `MissingColumn` diagnostic listing the actual columns.
+- `JOIN ... ON` no longer matches `NULL` keys (`NULL = NULL` no longer
+  matches), matching SQL semantics.
+
+### Added
+
+- Regression tests covering all of the above (`tests/fixes.rs`).
+
 ## [1.0.0] - 2026-09-11
 
 ### Added
@@ -54,4 +75,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   incumbent comparison records.
 - `CONTRIBUTING.md`, `SECURITY.md`.
 
+[1.0.1]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v1.0.1
 [1.0.0]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v1.0.0
