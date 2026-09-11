@@ -185,3 +185,117 @@ fn mixed_type_column_rejected_by_try_new() {
     // Nulls alongside a single non-null type are still fine.
     Table::try_new(vec![Column::new("x", vec![Scalar::I32(7), Scalar::Null])]).unwrap();
 }
+
+#[test]
+fn order_by_null_positions_deterministic() {
+    let ctx = ctx_with(
+        Table::try_new(vec![
+            Column::new(
+                "id",
+                vec![
+                    Scalar::I32(1),
+                    Scalar::I32(2),
+                    Scalar::I32(3),
+                    Scalar::I32(4),
+                ],
+            ),
+            Column::new(
+                "v",
+                vec![Scalar::I32(30), Scalar::Null, Scalar::I32(10), Scalar::Null],
+            ),
+        ])
+        .unwrap(),
+    );
+    let ids_of = |out: &Table| -> Vec<Scalar> {
+        let b = &out.batches()[0];
+        (0..b.row_count())
+            .map(|r| b.columns[0].get(r).unwrap_or(Scalar::Null))
+            .collect()
+    };
+
+    // NULLS FIRST ascending: the two null rows (ids 2, 4) come before the
+    // non-null values, which sort by value (10 before 30).
+    let out = ctx.run("SELECT id FROM t ORDER BY v").unwrap();
+    assert_eq!(
+        ids_of(&out),
+        vec![
+            Scalar::I32(2),
+            Scalar::I32(4),
+            Scalar::I32(3),
+            Scalar::I32(1)
+        ]
+    );
+
+    // Descending reverses the ordering, so nulls land last.
+    let out = ctx.run("SELECT id FROM t ORDER BY v DESC").unwrap();
+    assert_eq!(
+        ids_of(&out),
+        vec![
+            Scalar::I32(1),
+            Scalar::I32(3),
+            Scalar::I32(2),
+            Scalar::I32(4)
+        ]
+    );
+
+    // The same rule holds through the builder surface.
+    let table = Table::try_new(vec![Column::new(
+        "v",
+        vec![Scalar::I32(30), Scalar::Null, Scalar::I32(10)],
+    )])
+    .unwrap();
+    let out = QueryBuilder::new(&table)
+        .order_by("v", false)
+        .unwrap()
+        .execute()
+        .unwrap();
+    let b = &out.batches()[0];
+    let vals: Vec<_> = (0..b.row_count())
+        .map(|r| b.columns[0].get(r).unwrap_or(Scalar::Null))
+        .collect();
+    assert_eq!(vals, vec![Scalar::Null, Scalar::I32(10), Scalar::I32(30)]);
+}
+
+#[test]
+fn min_max_accept_orderable_types() {
+    // MIN/MAX are valid over every current native type (they mirror the
+    // SUM/AVG numeric guard with an orderability guard that is a no-op until
+    // a non-orderable DataType exists). Nulls are skipped by the accumulators.
+    let ctx = ctx_with(
+        Table::try_new(vec![
+            Column::new(
+                "name",
+                vec![
+                    Scalar::Str("b".into()),
+                    Scalar::Str("a".into()),
+                    Scalar::Null,
+                ],
+            ),
+            Column::new(
+                "flag",
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Null],
+            ),
+        ])
+        .unwrap(),
+    );
+    let out = ctx.run("SELECT MIN(name), MAX(name) FROM t").unwrap();
+    assert_eq!(
+        out.batches()[0].columns[0].get(0),
+        Some(Scalar::Str("a".into()))
+    );
+    assert_eq!(
+        out.batches()[0].columns[1].get(0),
+        Some(Scalar::Str("b".into()))
+    );
+
+    let out = ctx.run("SELECT MIN(flag), MAX(flag) FROM t").unwrap();
+    assert_eq!(
+        out.batches()[0].columns[0].get(0),
+        Some(Scalar::Bool(false))
+    );
+    assert_eq!(out.batches()[0].columns[1].get(0), Some(Scalar::Bool(true)));
+
+    // Strings were NOT accepted by the numeric-only SUM/AVG guard.
+    let err = ctx.run("SELECT AVG(name) FROM t").unwrap_err();
+    assert!(err.to_string().contains("numeric"), "unexpected: {err}");
+}

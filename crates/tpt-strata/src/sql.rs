@@ -12,6 +12,12 @@
 //!   [LIMIT n] [;]
 //! ```
 //!
+//! Anything outside this subset (e.g. `OR`, `IS NULL`, `IN`, `BETWEEN`,
+//! `LIKE`, `DISTINCT`, `HAVING`, parentheses, `LEFT`/`OUTER` joins,
+//! multiple joins, column-to-column comparisons) is rejected with a targeted
+//! diagnostic pointing at `docs/v1.1-scope.md` — the omissions are decisions,
+//! not accidents.
+//!
 //! Supported aggregate functions: `SUM`, `COUNT`, `MIN`, `MAX`, `AVG`,
 //! including `COUNT(*)`. Comparison ops: `=`, `!=`, `<>`, `>`, `>=`, `<`,
 //! `<=`. Literals may be integers, floats, single-quoted strings, `TRUE`,
@@ -91,6 +97,18 @@ enum Tok {
     On,
     And,
     As,
+    // Keywords lexed so the deliberate v1.1 scope gaps get targeted
+    // diagnostics instead of generic parse errors (see docs/v1.1-scope.md).
+    Or,
+    In,
+    Between,
+    Is,
+    Not,
+    Like,
+    Distinct,
+    Having,
+    Left,
+    Outer,
     Ident(String),
     Number(f64),
     Int(i64),
@@ -130,6 +148,16 @@ impl Tok {
             Tok::On => "ON".into(),
             Tok::And => "AND".into(),
             Tok::As => "AS".into(),
+            Tok::Or => "OR".into(),
+            Tok::In => "IN".into(),
+            Tok::Between => "BETWEEN".into(),
+            Tok::Is => "IS".into(),
+            Tok::Not => "NOT".into(),
+            Tok::Like => "LIKE".into(),
+            Tok::Distinct => "DISTINCT".into(),
+            Tok::Having => "HAVING".into(),
+            Tok::Left => "LEFT".into(),
+            Tok::Outer => "OUTER".into(),
             Tok::Ident(s) => s.clone(),
             Tok::Number(n) => format!("{n}"),
             Tok::Int(n) => format!("{n}"),
@@ -373,6 +401,16 @@ fn lex(input: &str) -> Result<(Vec<Tok>, Vec<usize>), QueryError> {
                         "ON" => Tok::On,
                         "AND" => Tok::And,
                         "AS" => Tok::As,
+                        "OR" => Tok::Or,
+                        "IN" => Tok::In,
+                        "BETWEEN" => Tok::Between,
+                        "IS" => Tok::Is,
+                        "NOT" => Tok::Not,
+                        "LIKE" => Tok::Like,
+                        "DISTINCT" => Tok::Distinct,
+                        "HAVING" => Tok::Having,
+                        "LEFT" => Tok::Left,
+                        "OUTER" => Tok::Outer,
                         "TRUE" => Tok::True,
                         "FALSE" => Tok::False,
                         "NULL" => Tok::Null,
@@ -449,6 +487,17 @@ impl Parser {
                 self.peek().describe()
             )))
         }
+    }
+
+    /// Reject a v1.1-scope SQL construct with a clear, deliberate diagnostic.
+    ///
+    /// These are *decided* omissions (see `docs/v1.1-scope.md`), spelled out
+    /// instead of a generic parse error, so callers know the gap is
+    /// intentional and how to express the query in the supported subset.
+    fn unsupported_v1_1(&self, what: &str, hint: &str) -> QueryError {
+        self.perr(format!(
+            "'{what}' is not supported in tpt-strata v1.1 (deliberate scope decision); {hint}. See docs/v1.1-scope.md"
+        ))
     }
 
     fn parse_column(&mut self) -> Result<String, QueryError> {
@@ -615,6 +664,34 @@ impl Parser {
 
     fn parse_pred(&mut self) -> Result<Pred, QueryError> {
         let column = self.parse_column()?;
+        // Deliberate v1.1 scope: only `col op literal` predicates are
+        // supported, so reject the known-but-deferred constructs up front.
+        match self.peek() {
+            Tok::In => {
+                return Err(self.unsupported_v1_1(
+                    "IN (...)",
+                    "use a chain of '=' predicates combined with AND",
+                ));
+            }
+            Tok::Between => {
+                return Err(
+                    self.unsupported_v1_1("BETWEEN", "use 'col >= low AND col <= high' instead")
+                );
+            }
+            Tok::Is => {
+                return Err(self.unsupported_v1_1(
+                    "IS NULL / IS NOT NULL",
+                    "filter on a sentinel value in the calling application",
+                ));
+            }
+            Tok::Like => {
+                return Err(self.unsupported_v1_1("LIKE", "use an exact '=' comparison"));
+            }
+            Tok::Not => {
+                return Err(self.unsupported_v1_1("NOT (...)", "express the predicate positively"));
+            }
+            _ => {}
+        }
         let op = match self.next() {
             Tok::Eq => Comparison::Eq,
             Tok::NotEq => Comparison::NotEq,
@@ -629,12 +706,27 @@ impl Parser {
                 )));
             }
         };
+        // A column in literal position means a column-to-column comparison,
+        // which is deliberately out of the v1.1 subset.
+        if matches!(self.peek(), Tok::Ident(_)) {
+            return Err(self.perr(format!(
+                "column-to-column comparisons are not supported in tpt-strata v1.1 (deliberate scope decision); compare '{}' against a literal instead. See docs/v1.1-scope.md",
+                column
+            )));
+        }
         let value = self.parse_literal()?;
         Ok(Pred::Compare { column, op, value })
     }
 
     fn parse_select(&mut self) -> Result<Select, QueryError> {
         self.expect(Tok::Select)?;
+
+        if self.accept(Tok::Distinct) {
+            return Err(self.unsupported_v1_1(
+                "DISTINCT",
+                "use a GROUP BY, or deduplicate in the calling application",
+            ));
+        }
 
         let mut projections = Vec::new();
         loop {
@@ -659,6 +751,12 @@ impl Parser {
         };
 
         let mut join = None;
+        if matches!(self.peek(), Tok::Left | Tok::Outer) {
+            return Err(self.unsupported_v1_1(
+                "LEFT/OUTER joins",
+                "only a single inner equi-join is supported",
+            ));
+        }
         if self.accept(Tok::Join) {
             let right = match self.peek().clone() {
                 Tok::Ident(s) => {
@@ -680,15 +778,32 @@ impl Parser {
                 right,
                 on: (left_col, right_col),
             });
+            if matches!(self.peek(), Tok::Join) {
+                return Err(self.unsupported_v1_1(
+                    "multiple JOINs",
+                    "only a single equi-join per query is supported",
+                ));
+            }
         }
 
         let mut predicates = Vec::new();
         if self.accept(Tok::Where) {
+            if matches!(self.peek(), Tok::LParen) {
+                return Err(self.unsupported_v1_1(
+                    "parenthesized expressions / operator precedence in WHERE",
+                    "combine predicates with AND only",
+                ));
+            }
             loop {
                 predicates.push(self.parse_pred()?);
                 if !self.accept(Tok::And) {
                     break;
                 }
+            }
+            if matches!(self.peek(), Tok::Or) {
+                return Err(
+                    self.unsupported_v1_1("OR in WHERE", "combine predicates with AND only")
+                );
             }
         }
 
@@ -700,6 +815,12 @@ impl Parser {
                 if !self.accept(Tok::Comma) {
                     break;
                 }
+            }
+            if matches!(self.peek(), Tok::Having) {
+                return Err(self.unsupported_v1_1(
+                    "HAVING",
+                    "filter the aggregated result in the calling application, or nest two queries",
+                ));
             }
         }
 
@@ -1131,7 +1252,19 @@ fn build_final_projection(
             ProjectionItem::Wild => {
                 for field in &schema.fields {
                     let name = field.name.clone();
-                    let idx = schema.index_of(&name).expect("schema field exists");
+                    // Invariant: every field in `schema` is a member of that
+                    // same schema, so `index_of` must resolve it by its own
+                    // name. The lookup cannot fail unless duplicate field
+                    // names creep in; the `debug_assert!` catches that during
+                    // development.
+                    debug_assert!(
+                        schema.index_of(&name).is_some(),
+                        "schema field '{}' must resolve by name in its own schema",
+                        name
+                    );
+                    let idx = schema
+                        .index_of(&name)
+                        .expect("schema field always resolves by name in its own schema");
                     if !names.contains(&name) {
                         exprs.push(Expr { column: idx });
                         names.push(name);

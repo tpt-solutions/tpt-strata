@@ -87,3 +87,18 @@ pub fn scalar_cmp(a: &Scalar, b: &Scalar) -> std::cmp::Ordering {
         _ => std::cmp::Ordering::Equal,
     }
 }
+
+/// Order two scalars for sort operators.
+///
+/// `NULL` sorts **first** (ascending) by design — it is treated as smaller
+/// than every non-null value, so a descending sort reverses it to last.
+/// Unlike [`scalar_cmp`], a `NULL`-vs-value pair never falls through to
+/// `Equal`, so nulls always land in a deterministic position.
+pub fn sort_cmp(a: &Scalar, b: &Scalar) -> std::cmp::Ordering {
+    match (a, b) {
+        (Scalar::Null, Scalar::Null) => std::cmp::Ordering::Equal,
+        (Scalar::Null, _) => std::cmp::Ordering::Less,
+        (_, Scalar::Null) => std::cmp::Ordering::Greater,
+        _ => scalar_cmp(a, b),
+    }
+}

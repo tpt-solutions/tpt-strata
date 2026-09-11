@@ -132,3 +132,118 @@ fn snapshot_group_by_validation() {
         "Unsupported operation: column 'department' must appear in the GROUP BY clause or be used in an aggregate function"
     );
 }
+
+// === Deliberate v1.1 scope gaps (targeted diagnostics) ===
+//
+// These features are *decided* omissions (docs/v1.1-scope.md), so each is
+// rejected with a message naming the construct and pointing at the decision,
+// rather than a generic parse error. The wording prefix is pinned below.
+
+#[test]
+fn snapshot_v1_1_or_in_where() {
+    let err = ctx()
+        .run("SELECT * FROM employees WHERE salary > 1 OR years < 2")
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("'OR in WHERE' is not supported in tpt-strata v1.1")
+            && text.contains("combine predicates with AND only")
+            && text.contains("docs/v1.1-scope.md"),
+        "unexpected diagnostic: {text}"
+    );
+}
+
+#[test]
+fn snapshot_v1_1_is_null_in_where() {
+    let err = ctx()
+        .run("SELECT * FROM employees WHERE department IS NOT NULL")
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("'IS NULL / IS NOT NULL' is not supported")
+            && text.contains("sentinel value"),
+        "unexpected diagnostic: {text}"
+    );
+}
+
+#[test]
+fn snapshot_v1_1_in_between_like_in_where() {
+    for sql in [
+        "SELECT * FROM employees WHERE years IN (1, 2)",
+        "SELECT * FROM employees WHERE years BETWEEN 1 AND 2",
+        "SELECT * FROM employees WHERE department LIKE 'e%'",
+    ] {
+        let err = ctx().run(sql).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("is not supported in tpt-strata v1.1")
+                && text.contains("docs/v1.1-scope.md"),
+            "unexpected diagnostic for {sql}: {text}"
+        );
+    }
+}
+
+#[test]
+fn snapshot_v1_1_parens_in_where() {
+    let err = ctx()
+        .run("SELECT * FROM employees WHERE (years = 1 OR salary > 0)")
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("parenthesized expressions / operator precedence")
+            && text.contains("docs/v1.1-scope.md"),
+        "unexpected diagnostic: {text}"
+    );
+}
+
+#[test]
+fn snapshot_v1_1_column_to_column_comparison() {
+    let err = ctx()
+        .run("SELECT * FROM employees WHERE salary = years")
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("column-to-column comparisons are not supported")
+            && text.contains("compare 'salary' against a literal instead"),
+        "unexpected diagnostic: {text}"
+    );
+}
+
+#[test]
+fn snapshot_v1_1_distinct() {
+    let err = ctx()
+        .run("SELECT DISTINCT department FROM employees")
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("'DISTINCT' is not supported") && text.contains("GROUP BY"),
+        "unexpected diagnostic: {text}"
+    );
+}
+
+#[test]
+fn snapshot_v1_1_having() {
+    let err = ctx()
+        .run("SELECT department FROM employees GROUP BY department HAVING COUNT(*)> 1")
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("'HAVING' is not supported") && text.contains("nest two queries"),
+        "unexpected diagnostic: {text}"
+    );
+}
+
+#[test]
+fn snapshot_v1_1_left_and_multiple_joins() {
+    for sql in [
+        "SELECT * FROM employees LEFT JOIN t ON employees.department = t.name",
+        "SELECT * FROM employees JOIN t ON employees.department = t.name JOIN t2 ON t.name = t2.name",
+    ] {
+        let err = ctx().run(sql).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("is not supported in tpt-strata v1.1") && text.contains("equi-join"),
+            "unexpected diagnostic for {sql}: {text}"
+        );
+    }
+}

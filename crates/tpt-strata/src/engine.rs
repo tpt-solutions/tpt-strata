@@ -5,7 +5,7 @@ use crate::array::ArrayRef;
 use crate::batch::Batch;
 use crate::error::QueryError;
 use crate::schema::{DataType, Field, Schema};
-use crate::types::{scalar_cmp, Scalar};
+use crate::types::{scalar_cmp, sort_cmp, Scalar};
 
 /// A physical plan node that can be executed to produce batches.
 pub trait PhysicalPlan: Send + Sync {
@@ -199,6 +199,24 @@ impl PhysicalPlan for ProjectExec {
 }
 
 // === Aggregate ===
+
+/// Whether a data type is orderable for `MIN`/`MAX` (and `ORDER BY`).
+///
+/// Every native v1 type is orderable, so this is a no-op guard today; it
+/// exists so a future non-orderable `DataType` (e.g. binary/JSON) fails at
+/// plan-build time with a named diagnostic instead of falling through to
+/// `scalar_cmp`'s equal-for-unknown fallback at runtime.
+fn is_orderable(dt: DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Boolean | DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Utf8
+    )
+}
+
+/// Whether a data type is numeric for `SUM`/`AVG`.
+fn is_numeric(dt: DataType) -> bool {
+    matches!(dt, DataType::Int32 | DataType::Int64 | DataType::Float64)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggFunc {
@@ -457,15 +475,18 @@ impl AggregateExec {
                     column: format!("index {}", agg.column),
                     available: vec![],
                 })?;
-            if matches!(agg.func, AggFunc::Sum | AggFunc::Avg)
-                && !matches!(
-                    f.data_type,
-                    DataType::Int32 | DataType::Int64 | DataType::Float64
-                )
-            {
+            if matches!(agg.func, AggFunc::Sum | AggFunc::Avg) && !is_numeric(f.data_type) {
                 return Err(QueryError::UnsupportedOperation {
                     message: format!(
                         "aggregate '{}' requires a numeric column; column '{}' has type {}",
+                        agg.out_name, f.name, f.data_type
+                    ),
+                });
+            }
+            if matches!(agg.func, AggFunc::Min | AggFunc::Max) && !is_orderable(f.data_type) {
+                return Err(QueryError::UnsupportedOperation {
+                    message: format!(
+                        "aggregate '{}' requires an orderable column; column '{}' has type {}",
                         agg.out_name, f.name, f.data_type
                     ),
                 });
@@ -718,7 +739,10 @@ impl PhysicalPlan for SortExec {
         let mut indices: Vec<usize> = (0..n).collect();
         indices.sort_by(|&a, &b| {
             for se in &self.sort_exprs {
-                let ord = scalar_cmp(&cols[se.column][a], &cols[se.column][b]);
+                // `sort_cmp` (not `scalar_cmp`) so NULL gets a deterministic
+                // position (first ascending) instead of silently comparing
+                // equal to non-null values.
+                let ord = sort_cmp(&cols[se.column][a], &cols[se.column][b]);
                 let ord = if se.desc { ord.reverse() } else { ord };
                 if ord != std::cmp::Ordering::Equal {
                     return ord;

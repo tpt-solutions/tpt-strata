@@ -14,9 +14,11 @@ Only the latest release receives security fixes.
 Please report suspected security vulnerabilities privately to the project
 maintainers before disclosing them publicly.
 
-- Email the maintainers directly, with "SECURITY" in the subject line.
+- Use GitHub's private vulnerability reporting for this repository:
+  <https://github.com/tpt-solutions/tpt-strata/security/advisories/new>
+  (see the "Security" tab on the repository). Include a minimal reproducer
+  and, if possible, a suggested fix.
 - Do **not** open a public issue for security findings.
-- Include a minimal reproducer and, if possible, a suggested fix.
 
 You should receive an acknowledgment within 3 business days. Depending on the
 severity, we will coordinate a disclosure timeline with you before a public

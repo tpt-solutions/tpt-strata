@@ -282,6 +282,10 @@ pub fn print_table(table: &Table) {
     println!();
 
     let n_rows = col_strs.first().map_or(0, Vec::len);
+    // Invariant: every column holds exactly `n_rows` values. Batches enforce
+    // equal column lengths (in `Batch::try_new`), and this loop pushed one
+    // value per row per column above, so the iterators below stay aligned.
+    debug_assert!(col_strs.iter().all(|c| c.len() == n_rows));
     let mut col_iters: Vec<_> = col_strs.iter().map(|c| c.iter()).collect();
     for _ in 0..n_rows {
         print!("|");

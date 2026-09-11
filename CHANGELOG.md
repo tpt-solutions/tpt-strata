@@ -4,6 +4,48 @@ All notable changes to tpt-strata will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- `ORDER BY` no longer mishandles `NULL`: nulls now sort **first** ascending
+  (`NULLS FIRST`) and last descending, instead of landing in an arbitrary
+  position via `scalar_cmp`'s equal-for-incomparable fallback. New
+  `sort_cmp` helper in `types.rs`; regression tests in `tests/fixes.rs`.
+- `MIN`/`MAX` now validate the column is orderable at plan-build time,
+  mirroring the numeric-only guard `SUM`/`AVG` already had. Every native v1
+  type is orderable today, so this is a future-proofing guard, not a behavior
+  change for current types.
+- Internal `QueryError::unsupported_format` renamed to
+  `QueryError::internal_downcast` and re-framed as a "should never happen"
+  coding-bug path rather than a caller-facing diagnostic.
+- Fragile `.expect()` calls in `sql.rs` (wildcard expansion) and `format.rs`
+  (equal column lengths) are now annotated with their invariants and a
+  `debug_assert!`.
+
+### Added
+
+- Targeted SQL diagnostics for the deliberately-deferred v1.1 constructs:
+  `OR`, parentheses, `IS NULL`/`IS NOT NULL`, `IN`, `BETWEEN`, `LIKE`,
+  `DISTINCT`, `HAVING`, `LEFT`/`OUTER` joins, multiple joins, and
+  column-to-column comparisons each get a message naming the construct and
+  pointing at `docs/v1.1-scope.md`. Snapshot tests in `tests/diagnostics.rs`.
+- Runnable examples: `examples/basic_query.rs` (builder),
+  `examples/sql_query.rs` (SQL incl. JOIN), `examples/diagnostics.rs` (every
+  `QueryError` variant), and
+  `crates/tpt-strata-parquet/examples/read_parquet.rs` (bridge, with a
+  self-generating sample file).
+- `docs/v1.1-scope.md` — deliberate scope decisions for deferred SQL
+  features, data types, and forward-looking ideas.
+- `docs/integration-recipe.md` — a template for wiring tpt-strata into a
+  struct-backed store (for tpt-keystone-db, tpt-aion, tpt-cloud-observability).
+- README badges (crates.io/docs.rs/CI/license), a condensed DataFusion
+  comparison table, and an examples section.
+- `SECURITY.md` now points at GitHub private vulnerability reporting instead
+  of a placeholder email.
+- `ARCHITECTURE.md` documents that `Sort`/`Join` fully materialize in memory
+  (no streaming/spill).
+
 ## [1.0.1] - 2026-09-11
 
 ### Fixed

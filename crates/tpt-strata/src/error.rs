@@ -57,10 +57,16 @@ impl fmt::Display for QueryError {
 impl std::error::Error for QueryError {}
 
 impl QueryError {
-    /// Internal helper for an array downcast that hit the wrong variant.
-    pub(crate) fn unsupported_format(array: &dyn std::fmt::Debug) -> Self {
+    /// Internal "should never happen" path: an `ArrayRef` downcast reached a
+    /// variant that contradicts the type checks enforced at the data boundary.
+    ///
+    /// This signals a coding bug, not a caller-data problem, so the message is
+    /// framed as an internal error and the raw dump is for maintainers. It is
+    /// returned (rather than panicked) so a caller can still observe and
+    /// report it instead of crashing mid-query.
+    pub(crate) fn internal_downcast(array: &dyn std::fmt::Debug) -> Self {
         QueryError::UnsupportedOperation {
-            message: format!("internal type mismatch during conversion: {array:?}"),
+            message: format!("internal error: array downcast hit an unexpected variant: {array:?}"),
         }
     }
 }

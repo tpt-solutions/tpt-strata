@@ -65,13 +65,19 @@ Dependency direction: the upper modules are layers over the lower ones.
 
 - Operators are **pull-based and in-process**; each `execute()` call fully
   materializes its output batches.
+- `SortExec` and `JoinExec` **fully materialize their inputs in memory** —
+  neither operator streams or spills to disk. Consumers should assume a
+  `ORDER BY`/`JOIN` costs working memory proportional to the input, not a
+  bounded pipe. (This commitment is recorded in `docs/v1.1-scope.md`; any
+  future streaming/spill mode is a spec change, not a silent default.)
 - `AggregateExec` accumulates group state in a `HashMap` keyed by the group
   key scalars; global aggregates (no `GROUP BY`) emit a single row even over
   zero input rows.
 - `JoinExec` is a hash join: it indexes the right input by key, then walks
   the left input, emitting **one contiguous batch** for all matches.
 - `SortExec` materializes all rows into per-column vectors, sorts an index
-  array, then rebuilds native columns.
+  array (nulls first ascending — see `sort_cmp` in `types.rs`), then
+  rebuilds native columns.
 - `LimitExec` stops as soon as its budget is exhausted (it short-circuits
   remaining input batches).
 - These are single-threaded. Parallelism, vectorization, and code generation
@@ -91,6 +97,10 @@ SQL query and the equivalent builder chain return identical tables.
   `AS` aliases are parsed and discarded (order/project by the underlying
   expression), types are coerced from numeric literals to the compared
   column's type, and keywords are case-insensitive while identifiers are not.
+  Constructs outside the subset (`OR`, `IS NULL`, `IN`, `BETWEEN`, `LIKE`,
+  `DISTINCT`, `HAVING`, parentheses, `LEFT`/`OUTER` joins, multiple joins,
+  column-to-column comparisons) are rejected with targeted diagnostics; the
+  decisions behind those gaps live in `docs/v1.1-scope.md`.
 
 ## The bridge-isolation rule in practice
 

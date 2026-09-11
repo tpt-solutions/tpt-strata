@@ -215,7 +215,7 @@ macro_rules! impl_array {
             fn try_from(value: &'a ArrayRef) -> Result<Self, Self::Error> {
                 match value {
                     ArrayRef::$variant(a) => Ok(a),
-                    other => Err(crate::error::QueryError::unsupported_format(other)),
+                    other => Err(crate::error::QueryError::internal_downcast(other)),
                 }
             }
         }
