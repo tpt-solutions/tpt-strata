@@ -221,6 +221,73 @@ macro_rules! impl_array {
                 Self { values, valid }
             }
 
+            fn push_value(&mut self, v: $ty) {
+                if let Some(bits) = self.valid.as_mut() {
+                    bits.push(true);
+                }
+                self.values.push(v);
+            }
+
+            fn push_null(&mut self) {
+                let len = self.values.len();
+                self.valid
+                    .get_or_insert_with(|| vec![true; len])
+                    .push(false);
+                self.values.push($null);
+            }
+
+            /// Append rows `start..start + len` of `self` to `out`. A NULL-free
+            /// run is copied as one slice.
+            fn append_range(&self, start: usize, len: usize, out: &mut Self) {
+                if self.valid.is_none() && start + len <= self.values.len() {
+                    if let Some(bits) = out.valid.as_mut() {
+                        bits.resize(bits.len() + len, true);
+                    }
+                    out.values
+                        .extend_from_slice(&self.values[start..start + len]);
+                } else {
+                    for i in start..start + len {
+                        match self.value_ref(i) {
+                            Some(v) => out.push_value(v.clone()),
+                            None => out.push_null(),
+                        }
+                    }
+                }
+            }
+
+            /// Gather the elements at `pos` from the batches in `parts`. Each
+            /// position is a packed `(batch, row)` word, and `no_row` gives a
+            /// NULL. Runs of consecutive rows in one batch are copied as slices.
+            pub(crate) fn gather_positions(
+                parts: &[Option<&Self>],
+                pos: &[u64],
+                no_row: u64,
+            ) -> Self {
+                let mut out = Self::from_parts(Vec::with_capacity(pos.len()), None);
+                let mut k = 0;
+                while k < pos.len() {
+                    let p = pos[k];
+                    let src = if p == no_row {
+                        None
+                    } else {
+                        parts.get((p >> 32) as usize).copied().flatten()
+                    };
+                    let Some(src) = src else {
+                        out.push_null();
+                        k += 1;
+                        continue;
+                    };
+                    let row = (p & 0xffff_ffff) as usize;
+                    let mut len = 1;
+                    while k + len < pos.len() && pos[k + len] == p + len as u64 {
+                        len += 1;
+                    }
+                    src.append_range(row, len, &mut out);
+                    k += len;
+                }
+                out
+            }
+
             /// An array from optional values; `None` is NULL.
             pub fn from_nulls(values: Vec<Option<$ty>>) -> Self {
                 // One pass. The validity vector appears at the first NULL, and

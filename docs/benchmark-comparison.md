@@ -267,3 +267,16 @@ pre-validity Q3 (52.6 ms): about 7 ms.
 | Q1 group by + 3 aggregates | 27.3 ms | 25.7–29.2 ms | 24.7 ms |
 | Q2 filter + sort + limit | 14.8 ms | 13.6–15.1 ms | 13.4 ms |
 | Q3 join + group by | 52.6 ms | 65.3–65.5 ms | 59.5 ms |
+
+### Phase 15, run-based join gather
+
+The join's output gather copies runs of consecutive rows as slices, and builds
+values and validity directly. Q3 on the Parquet-loaded tables now clears the
+pre-validity baseline.
+
+| | Before validity | After validity | This change |
+|---|---|---|---|
+| Parquet load | 101.6 ms | 71–75 ms | 73.7 ms |
+| Q1 group by + 3 aggregates | 27.3 ms | 25.7–29.2 ms | 24.0 ms |
+| Q2 filter + sort + limit | 14.8 ms | 13.6–15.1 ms | 13.4 ms |
+| Q3 join + group by | 52.6 ms | 65.3–65.5 ms | 43.7 ms |

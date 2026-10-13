@@ -145,18 +145,7 @@ fn gather_packed(batches: &[BatchRef], col: usize, pos: &[u64], dt: DataType) ->
                     _ => None,
                 })
                 .collect();
-            let vals = pos
-                .iter()
-                .map(|&p| {
-                    if p == NO_ROW {
-                        return None;
-                    }
-                    let b = (p >> 32) as usize;
-                    let r = (p & 0xffff_ffff) as usize;
-                    parts[b].and_then(|a| a.value(r))
-                })
-                .collect();
-            ArrayRef::$variant($arr::from_nulls(vals))
+            ArrayRef::$variant($arr::gather_positions(&parts, pos, NO_ROW))
         }};
     }
     match dt {
