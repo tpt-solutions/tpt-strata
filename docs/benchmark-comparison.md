@@ -294,3 +294,19 @@ in order, so the output is the same as the single pass. Q3 on the Parquet tables
 | join, no output columns | 27.2 ms | 21.8 ms |
 
 The default build is unchanged in behaviour. Its timing is within the usual run-to-run spread.
+
+### Phase 15, parallel gather and filter: tried, not kept
+
+Both were tried under the `parallel` feature, on the same 1M-row Parquet tables:
+
+| change | Q2 (filter, sort, limit) | Q3 (join, group by) |
+|---|---|---|
+| none (probe and aggregation parallel) | 15.9 ms | 39.6–41 ms |
+| parallel filter (predicates and copies on workers) | 16.5 ms | - |
+| parallel gather for all columns | - | 51–57 ms |
+| parallel gather for numeric columns only | - | 51 ms |
+
+Neither helped. The filter's copies and the gather's reference-count updates on
+shared strings do not parallelise well, and the thread start-up and merge cost
+outweighs the gain on these sizes. Both were reverted. The probe and the
+aggregation are the parallel wins.
