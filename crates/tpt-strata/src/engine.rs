@@ -96,13 +96,18 @@ where
 {
     macro_rules! take_typed {
         ($variant:ident, $arr:ident) => {{
+            // Resolve each batch's typed array once, not once per element.
+            let parts: Vec<Option<&$arr>> = batches
+                .iter()
+                .map(|b| match &*b.columns[col] {
+                    ArrayRef::$variant(a) => Some(a),
+                    _ => None,
+                })
+                .collect();
             let vals = pos
                 .into_iter()
                 .map(|p| match p {
-                    Some((b, r)) => match &*batches[b].columns[col] {
-                        ArrayRef::$variant(a) => a.0.get(r).cloned().flatten(),
-                        _ => None,
-                    },
+                    Some((b, r)) => parts[b].and_then(|a| a.0.get(r).cloned().flatten()),
                     None => None,
                 })
                 .collect();
@@ -729,8 +734,12 @@ impl PhysicalPlan for JoinExec {
             .iter()
             .map(|b| vec![false; b.row_count()])
             .collect();
-        let mut left_pos: Vec<Option<(usize, usize)>> = Vec::new();
-        let mut right_pos: Vec<Option<(usize, usize)>> = Vec::new();
+        // Sized for one output row per left row: exact for key joins, and a
+        // good start for the rest.
+        let mut left_pos: Vec<Option<(usize, usize)>> =
+            Vec::with_capacity(left_batches.iter().map(|b| b.row_count()).sum());
+        let mut right_pos: Vec<Option<(usize, usize)>> =
+            Vec::with_capacity(left_batches.iter().map(|b| b.row_count()).sum());
         for (lbi, lb) in left_batches.iter().enumerate() {
             for row in 0..lb.row_count() {
                 let key = key_at(&lb.columns[self.left_key], row);

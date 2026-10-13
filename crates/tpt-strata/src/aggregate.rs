@@ -173,8 +173,11 @@ impl AggState {
     }
 
     /// Fold the value at `pos` = (batch, row) into group `gid`.
-    fn update(&mut self, gid: usize, batches: &[BatchRef], pos: (usize, usize)) {
-        let (bi, row) = pos;
+    /// Fold one batch into the state. `gids[row]` is the group of each row of
+    /// batch `bi`. The column type is matched once per batch, and each loop is
+    /// typed, so there is no per-row dispatch on state or column.
+    fn update_batch(&mut self, batches: &[BatchRef], bi: usize, gids: &[usize]) {
+        let batch = &batches[bi];
         match self {
             AggState::Sum {
                 col,
@@ -182,72 +185,90 @@ impl AggState {
                 float,
                 saw,
                 ..
-            } => match &*batches[bi].columns[*col] {
+            } => match &*batch.columns[*col] {
                 ArrayRef::Int32(a) => {
-                    if let Some(v) = a.0[row] {
-                        int[gid] += i128::from(v);
-                        float[gid] += f64::from(v);
-                        saw[gid] = true;
+                    for (row, &gid) in gids.iter().enumerate() {
+                        if let Some(v) = a.0[row] {
+                            int[gid] += i128::from(v);
+                            float[gid] += f64::from(v);
+                            saw[gid] = true;
+                        }
                     }
                 }
                 ArrayRef::Int64(a) => {
-                    if let Some(v) = a.0[row] {
-                        int[gid] += i128::from(v);
-                        float[gid] += v as f64;
-                        saw[gid] = true;
+                    for (row, &gid) in gids.iter().enumerate() {
+                        if let Some(v) = a.0[row] {
+                            int[gid] += i128::from(v);
+                            float[gid] += v as f64;
+                            saw[gid] = true;
+                        }
                     }
                 }
                 ArrayRef::Float64(a) => {
-                    if let Some(v) = a.0[row] {
-                        float[gid] += v;
-                        saw[gid] = true;
+                    for (row, &gid) in gids.iter().enumerate() {
+                        if let Some(v) = a.0[row] {
+                            float[gid] += v;
+                            saw[gid] = true;
+                        }
                     }
                 }
                 _ => {}
             },
             AggState::Count { col, count_star, n } => {
-                if *count_star || !batches[bi].columns[*col].is_null(row) {
-                    n[gid] += 1;
+                let column = &batch.columns[*col];
+                for (row, &gid) in gids.iter().enumerate() {
+                    if *count_star || !column.is_null(row) {
+                        n[gid] += 1;
+                    }
                 }
             }
             AggState::MinMax { col, max, best } => {
-                let value = &batches[bi].columns[*col];
-                if value.is_null(row) {
-                    return;
-                }
-                let replace = match best[gid] {
-                    None => true,
-                    Some((cb, cr)) => {
-                        let current = key_at(&batches[cb].columns[*col], cr);
-                        let ord = key_at(value, row).cmp(&current);
-                        if *max {
-                            ord == std::cmp::Ordering::Greater
-                        } else {
-                            ord == std::cmp::Ordering::Less
-                        }
+                let value = &batch.columns[*col];
+                for (row, &gid) in gids.iter().enumerate() {
+                    if value.is_null(row) {
+                        continue;
                     }
-                };
-                if replace {
-                    best[gid] = Some(pos);
+                    let pos = (bi, row);
+                    let replace = match best[gid] {
+                        None => true,
+                        Some((cb, cr)) => {
+                            let current = key_at(&batches[cb].columns[*col], cr);
+                            let ord = key_at(value, row).cmp(&current);
+                            if *max {
+                                ord == std::cmp::Ordering::Greater
+                            } else {
+                                ord == std::cmp::Ordering::Less
+                            }
+                        }
+                    };
+                    if replace {
+                        best[gid] = Some(pos);
+                    }
                 }
             }
-            AggState::Avg { col, int, float, n } => match &*batches[bi].columns[*col] {
+            AggState::Avg { col, int, float, n } => match &*batch.columns[*col] {
                 ArrayRef::Int32(a) => {
-                    if let Some(v) = a.0[row] {
-                        int[gid] += i128::from(v);
-                        n[gid] += 1;
+                    for (row, &gid) in gids.iter().enumerate() {
+                        if let Some(v) = a.0[row] {
+                            int[gid] += i128::from(v);
+                            n[gid] += 1;
+                        }
                     }
                 }
                 ArrayRef::Int64(a) => {
-                    if let Some(v) = a.0[row] {
-                        int[gid] += i128::from(v);
-                        n[gid] += 1;
+                    for (row, &gid) in gids.iter().enumerate() {
+                        if let Some(v) = a.0[row] {
+                            int[gid] += i128::from(v);
+                            n[gid] += 1;
+                        }
                     }
                 }
                 ArrayRef::Float64(a) => {
-                    if let Some(v) = a.0[row] {
-                        float[gid] += v;
-                        n[gid] += 1;
+                    for (row, &gid) in gids.iter().enumerate() {
+                        if let Some(v) = a.0[row] {
+                            float[gid] += v;
+                            n[gid] += 1;
+                        }
                     }
                 }
                 _ => {}
@@ -409,7 +430,10 @@ impl PhysicalPlan for AggregateExec {
         let mut scratch: Vec<KeyPart<'_>> = Vec::with_capacity(self.group_by.len());
         // With one group column, index on the key itself: no per-row Vec.
         let mut single_index: FastMap<KeyPart<'_>, usize> = FastMap::default();
+        // Group ids for one batch at a time; each aggregate then folds the whole batch.
+        let mut gids: Vec<usize> = Vec::new();
         for (bi, batch) in batches.iter().enumerate() {
+            gids.clear();
             for row in 0..batch.row_count() {
                 let gid = if global {
                     0
@@ -447,9 +471,10 @@ impl PhysicalPlan for AggregateExec {
                         }
                     }
                 };
-                for s in &mut states {
-                    s.update(gid, &batches, (bi, row));
-                }
+                gids.push(gid);
+            }
+            for s in &mut states {
+                s.update_batch(&batches, bi, &gids);
             }
         }
 

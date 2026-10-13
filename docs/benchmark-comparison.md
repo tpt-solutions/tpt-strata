@@ -145,3 +145,24 @@ What changed, and what the measurements showed:
 Parity with DataFusion and DuckDB is not reached. The remaining gaps are the
 join, the per-row aggregate dispatch, and the layout of arrays as
 `Vec<Option<T>>`.
+
+### Phase 15, second run (after batch-at-a-time aggregation and join changes)
+
+Same machine and method as above.
+
+| query | tpt-strata (1 thread) | DataFusion (1 partition) | DataFusion (all cores) | DuckDB (1 thread) | DuckDB (all cores) |
+|---|---|---|---|---|---|
+| Q1 group by + 3 aggregates | 29.2 ms | 7.94 ms | 4.28 ms | 23.3 ms | 7.25 ms |
+| Q2 filter + sort + limit | 14.6 ms | 3.76 ms | 2.03 ms | 14.1 ms | 3.60 ms |
+| Q3 join + group by | 58.6 ms | 9.42 ms | 4.46 ms | 6.37 ms | 6.07 ms |
+
+Load: tpt-strata 146 ms (before the Parquet string-collector change, which is
+measured in the next run), DataFusion 39 ms, DuckDB 686 ms and 112 ms.
+
+Changes in this step: aggregates fold each batch with typed loops, not one
+dispatch per row (SQL GROUP BY, 100k rows: 86 → 47 ns/row); the join sizes its
+output vectors up front (probe 28 → 15 ms on 1M rows); the join's gather
+resolves each batch's array once. Q3 dropped from 95 to 59 ms.
+
+Parity is still not reached. Q3 is about 6× DataFusion on one thread; Q1 and
+Q2 are about 3–4×.

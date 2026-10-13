@@ -613,10 +613,9 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
       input order. Tested against a full sort.
 - [x] Single-key GROUP BY indexes on the key, with no per-row `Vec`.
 - [x] Q2 (filter, sort, limit): 54 ms → 18 ms on 1M rows.
-- [ ] Q1 (GROUP BY): 34.7 → 32.4 ms. Aggregates still dispatch per row. Next:
-      batch-at-a-time accumulation with typed column loops.
-- [ ] Q3 (join): 104 → 95 ms, still about 8× DataFusion on one thread. Not yet
-      profiled.
+- [x] Q1 (GROUP BY): 34.7 → 29.2 ms. Aggregates fold each batch with typed loops.
+- [ ] Q3 (join): 104 → 59 ms, still about 6× DataFusion on one thread. Probe and
+      output gather are the costs (the position vectors are 24 bytes per row).
 - [ ] Parity is not reached. Remaining gaps: join, per-row aggregate dispatch,
       `Vec<Option<T>>` array layout, and single-threaded execution.
 - [ ] Profiler re-run (12f) is still blocked on elevation.

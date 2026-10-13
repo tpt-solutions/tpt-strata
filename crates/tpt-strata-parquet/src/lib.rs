@@ -99,7 +99,7 @@ enum Collector {
     I32(Vec<Option<i32>>),
     I64(Vec<Option<i64>>),
     F64(Vec<Option<f64>>),
-    Str(Vec<Option<String>>),
+    Str(Vec<Option<std::sync::Arc<str>>>),
     Date(Vec<Option<i32>>),
     Timestamp(Vec<Option<i64>>),
 }
@@ -146,11 +146,20 @@ impl Collector {
             }
             Collector::Str(v) => {
                 let a = arrow_downcast::<StringArray>(arr, column, "STRING")?;
+                // One allocation per distinct value in this batch, not per row.
+                let mut shared: tpt_strata::key::FastMap<&str, std::sync::Arc<str>> =
+                    Default::default();
                 for i in 0..a.len() {
                     v.push(if a.is_null(i) {
                         None
                     } else {
-                        Some(a.value(i).to_string())
+                        let s = a.value(i);
+                        Some(
+                            shared
+                                .entry(s)
+                                .or_insert_with(|| std::sync::Arc::from(s))
+                                .clone(),
+                        )
                     });
                 }
             }
@@ -176,12 +185,7 @@ impl Collector {
             Collector::I32(v) => tpt_strata::I32Array::from_nulls(v).into(),
             Collector::I64(v) => tpt_strata::I64Array::from_nulls(v).into(),
             Collector::F64(v) => tpt_strata::F64Array::from_nulls(v).into(),
-            Collector::Str(v) => tpt_strata::StrArray::from_nulls(
-                v.into_iter()
-                    .map(|s| s.map(std::sync::Arc::<str>::from))
-                    .collect(),
-            )
-            .into(),
+            Collector::Str(v) => tpt_strata::StrArray::from_nulls(v).into(),
             Collector::Date(v) => ArrayRef::Date(tpt_strata::I32Array::from_nulls(v)),
             Collector::Timestamp(v) => ArrayRef::Timestamp(tpt_strata::I64Array::from_nulls(v)),
         }
