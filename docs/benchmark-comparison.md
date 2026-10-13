@@ -252,3 +252,18 @@ stores no validity. Numeric columns are half the size they were.
 
 Q3 regressed on the Parquet-loaded tables; the same join in memory is at the
 earlier time (58 ms against 57 ms). The cause is not yet identified.
+
+### Phase 15, validity fix (`value_ref` on the no-NULL path)
+
+Q3 on the Parquet-loaded tables: 75 ms before this fix, 60 ms in the Parquet
+stage timing, and 59.5 ms in the comparison. The single-stage numbers
+against the pre-validity commit were: join count-only 24 ms before and 30 ms
+now; numeric gather 2.5 ms before and about 6 ms now. Remaining gap to the
+pre-validity Q3 (52.6 ms): about 7 ms.
+
+| | Before validity | After validity | After `value_ref` fix |
+|---|---|---|---|
+| Parquet load | 101.6 ms | 71–73 ms | 75 ms |
+| Q1 group by + 3 aggregates | 27.3 ms | 25.7–29.2 ms | 24.7 ms |
+| Q2 filter + sort + limit | 14.8 ms | 13.6–15.1 ms | 13.4 ms |
+| Q3 join + group by | 52.6 ms | 65.3–65.5 ms | 59.5 ms |

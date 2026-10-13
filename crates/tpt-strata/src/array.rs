@@ -248,10 +248,13 @@ macro_rules! impl_array {
             /// The value at `i`, or `None` if it is NULL or out of range.
             #[inline]
             pub fn value_ref(&self, i: usize) -> Option<&$ty> {
-                if self.is_valid(i) {
-                    self.values.get(i)
-                } else {
-                    None
+                // One bounds check on the common no-NULL path.
+                match &self.valid {
+                    None => self.values.get(i),
+                    Some(valid) => match valid.get(i) {
+                        Some(true) => self.values.get(i),
+                        _ => None,
+                    },
                 }
             }
 
