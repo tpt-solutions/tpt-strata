@@ -2,7 +2,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BooleanArray, Date32Array, Float64Array, Int32Array, StringArray};
+use arrow::array::{BinaryArray, BooleanArray, Float64Array, Int32Array, StringArray};
 use arrow::datatypes::{DataType as AType, Field as AField, Schema as ASchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -100,29 +100,109 @@ fn imported_table_is_queryable() {
 fn rejects_unsupported_type_with_diagnostic() {
     let schema = ASchema::new(vec![
         AField::new("id", AType::Int32, false),
-        AField::new("hired", AType::Date32, true),
+        AField::new("blob", AType::Binary, true),
     ]);
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
         vec![
             Arc::new(Int32Array::from(vec![1, 2])),
-            Arc::new(Date32Array::from(vec![100, 200])),
+            Arc::new(BinaryArray::from(vec![b"ab".as_ref(), b"c".as_ref()])),
         ],
     )
     .unwrap();
-    let path = fixture_dir("unsupported").join("dates.parquet");
+    let path = fixture_dir("unsupported").join("binary.parquet");
     write_parquet(&path, schema, vec![batch]);
 
     let err = tpt_strata_parquet::read_parquet(&path).unwrap_err();
     let text = err.to_string();
     assert!(
-        text.contains("unsupported Parquet type for column 'hired'"),
+        text.contains("unsupported Parquet type for column 'blob'"),
         "{text}"
     );
-    assert!(
-        text.contains("Supported: BOOLEAN, INT32, INT64, DOUBLE, STRING"),
-        "{text}"
-    );
+    assert!(text.contains("Supported: BOOLEAN"), "{text}");
+    assert!(text.contains("read_parquet_columns"), "{text}");
+
+    // Selecting only the supported column reads the file.
+    let ok = tpt_strata_parquet::read_parquet_columns(&path, &["id"]).unwrap();
+    assert_eq!(ok.row_count(), 2);
+}
+
+#[test]
+fn widens_small_integers_and_floats_losslessly() {
+    use arrow::array::{Float32Array, Int8Array, UInt32Array};
+    let schema = ASchema::new(vec![
+        AField::new("small", AType::Int8, false),
+        AField::new("wide", AType::UInt32, false),
+        AField::new("f", AType::Float32, false),
+    ]);
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(Int8Array::from(vec![-3i8, 7])),
+            Arc::new(UInt32Array::from(vec![4_000_000_000u32, 1])),
+            Arc::new(Float32Array::from(vec![0.5f32, 2.25])),
+        ],
+    )
+    .unwrap();
+    let path = fixture_dir("widen").join("widen.parquet");
+    write_parquet(&path, schema, vec![batch]);
+
+    let t = tpt_strata_parquet::read_parquet(&path).unwrap();
+    assert_eq!(t.schema().fields[0].data_type, DataType::Int32);
+    assert_eq!(t.schema().fields[1].data_type, DataType::Int64);
+    assert_eq!(t.schema().fields[2].data_type, DataType::Float64);
+    let b = &t.batches()[0];
+    assert_eq!(b.columns[0].get(0), Some(Scalar::I32(-3)));
+    assert_eq!(b.columns[1].get(0), Some(Scalar::I64(4_000_000_000)));
+    assert_eq!(b.columns[2].get(1), Some(Scalar::F64(2.25)));
+}
+
+#[test]
+fn round_trips_through_write_parquet() {
+    use tpt_strata::{Column, Table};
+    let original = Table::try_new(vec![
+        Column::new("name", vec![Scalar::Str("ann".into()), Scalar::Null]),
+        Column::new("score", vec![Scalar::I64(9), Scalar::I64(-1)]),
+        Column::new("ok", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+    ])
+    .unwrap();
+    let path = fixture_dir("roundtrip").join("out.parquet");
+    tpt_strata_parquet::write_parquet(&original, &path).unwrap();
+
+    let back = tpt_strata_parquet::read_parquet(&path).unwrap();
+    assert_eq!(back.column_names(), vec!["name", "score", "ok"]);
+    assert_eq!(back.row_count(), 2);
+    let b = &back.batches()[0];
+    assert_eq!(b.columns[0].get(0), Some(Scalar::Str("ann".into())));
+    assert_eq!(b.columns[0].get(1), None);
+    assert_eq!(b.columns[1].get(1), Some(Scalar::I64(-1)));
+    assert_eq!(b.columns[2].get(0), Some(Scalar::Bool(true)));
+}
+
+#[test]
+fn reads_from_in_memory_bytes() {
+    use tpt_strata::{Column, Table};
+    let original =
+        Table::try_new(vec![Column::new("n", vec![Scalar::I32(1), Scalar::I32(2)])]).unwrap();
+    let path = fixture_dir("bytes").join("n.parquet");
+    tpt_strata_parquet::write_parquet(&original, &path).unwrap();
+    let data = std::fs::read(&path).unwrap();
+    let t = tpt_strata_parquet::read_parquet_bytes(bytes::Bytes::from(data)).unwrap();
+    assert_eq!(t.row_count(), 2);
+}
+
+#[test]
+fn missing_projection_column_is_a_missing_column_error() {
+    let schema = ASchema::new(vec![AField::new("id", AType::Int32, false)]);
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![Arc::new(Int32Array::from(vec![1]))],
+    )
+    .unwrap();
+    let path = fixture_dir("projection").join("ids.parquet");
+    write_parquet(&path, schema, vec![batch]);
+    let err = tpt_strata_parquet::read_parquet_columns(&path, &["nope"]).unwrap_err();
+    assert!(err.to_string().contains("No column named 'nope'"), "{err}");
 }
 
 #[test]

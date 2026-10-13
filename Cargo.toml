@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# Starter projects, the Python extension (built with maturin), and the
+# comparison benchmark build on their own; they are not part of the workspace.
+exclude = ["templates", "crates/tpt-strata-python", "bench/compare"]
 
 [workspace.package]
 version = "1.0.1"
@@ -10,8 +13,6 @@ license = "MIT OR Apache-2.0"
 authors = ["TPT Solutions"]
 repository = "https://github.com/tpt-solutions/tpt-strata"
 homepage = "https://github.com/tpt-solutions/tpt-strata"
-keywords = ["columnar", "query-engine", "analytics", "embeddable", "sql"]
-categories = ["database", "parser-implementations", "compilers"]
 
 [workspace.dependencies]
 parquet = { version = "55", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "flate2"] }

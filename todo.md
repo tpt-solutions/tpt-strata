@@ -126,10 +126,10 @@ with no core-crate dependency on the Parquet/interchange ecosystem.
 
 - [x] Confirm from Phase 0 whether v1 needs export or it can wait
       (Phase 0 memo, Section 4: **defer** — no consumer needs it at launch)
-- [ ] (If in scope) Emit query results as external interchange-format
-      record batches from the bridge crate
-- [ ] (If in scope) Export bridge test suite, round-trip tests against a
-      consumer (e.g. PyArrow-readable output)
+- [x] (If in scope) Emit query results as external interchange-format
+      record batches from the bridge crate — `write_parquet` (Phase 13)
+- [x] Export bridge round-trip tests (Parquet write then read, Phase 13).
+      Still open: a check against an external consumer such as PyArrow.
 
 **Milestone:** Results can flow out to external BI/interchange tooling
 without the core engine depending on that format.
@@ -220,20 +220,19 @@ the benchmark numbers.
 
 ### Missing SQL features (scope as a deliberate v1.1 decision, not bugs)
 
-Decision: **all deferred as deliberate v1.1 scope**, recorded in
-`docs/v1.1-scope.md`, and each now gets a targeted parser diagnostic (tests in
-`tests/diagnostics.rs`) instead of a generic parse error — so they are
-rejected *by decision*, not by omission.
+Status: the items below were first *decided* as v1.1 scope (recorded in
+`docs/v1.1-scope.md`). Checkboxes now reflect whether the feature is
+**implemented** (`[x]`) or still **deferred** (`[ ]`, rejected with a targeted
+parser diagnostic). See Phase 13 for the implementation log.
 
-- [x] `OR` in `WHERE` (only `AND`-chains supported today, `sql.rs:9`,
-      `:686-693`)
-- [x] `IS NULL` / `IS NOT NULL`
-- [x] `IN (...)` and `BETWEEN`
-- [x] Parentheses / operator precedence in `WHERE`
-- [x] `LIKE`, `DISTINCT`, `HAVING`
-- [x] Multiple `JOIN`s per query; LEFT/OUTER join (today: single inner
-      equi-join only, `engine.rs:557-670`)
-- [x] Column-to-column comparisons in `WHERE` (today: column-vs-literal
+- [ ] `OR` in `WHERE` — deferred; needs a boolean expression tree
+- [x] `IS NULL` / `IS NOT NULL` — implemented (Phase 13)
+- [ ] `IN (...)` — deferred; needs `OR`. `BETWEEN` is implemented (Phase 13)
+- [ ] Parentheses / operator precedence in `WHERE` — deferred with `OR`
+- [x] `LIKE` / `NOT LIKE`, `DISTINCT`, `HAVING` — implemented (Phase 13)
+- [ ] Multiple `JOIN`s per query; LEFT/OUTER join — deferred (single inner
+      equi-join only)
+- [ ] Column-to-column comparisons in `WHERE` — deferred (column-vs-literal
       only)
 
 ### Missing data types
@@ -243,10 +242,12 @@ in `docs/v1.1-scope.md`. Adding a type touches the whole native format
 (`Scalar`, `DataType`, arrays, engine comparisons, `format.rs`, bridge), so
 each must be bought by a real consumer schema.
 
-- [x] Evaluate adding `Date`/`Timestamp` (most Parquet-relevant gap) —
-      check tpt-cloud-observability's actual schema needs first.
-- [x] Evaluate `Decimal`; lower priority: `Int8`/`Int16`, unsigned ints,
-      `Float32`, `Binary`.
+- [ ] Native `Date`/`Timestamp` types — deferred. Parquet DATE32 and
+      TIMESTAMP columns import as their raw integers (Phase 13), which covers
+      the queryable case without a new native type.
+- [ ] Native `Decimal`, `Binary`, `Float32`, `Int8`/`Int16`, unsigned types —
+      deferred. Narrow and unsigned integers and Float32 are widened to
+      `i32`/`i64`/`f64` at import (Phase 13), so no new native type is needed.
 
 ### Documentation
 
@@ -259,12 +260,252 @@ Decision: **demand-gated**, recorded in `docs/v1.1-scope.md` with the named
 consumer gate for each.
 
 - [x] `Table::from_rows`-style row-oriented convenience constructor
-      alongside `Table::try_new`.
-- [x] `EXPLAIN`-style plan-printing function using the existing diagnostics
-      infrastructure.
-- [x] Roadmap line for a minimal streaming/incremental aggregation mode,
-      given tpt-cloud-observability is a named consumer.
+      alongside `Table::try_new` — implemented (Phase 13).
+- [x] `EXPLAIN`-style plan-printing function — implemented as
+      `SqlContext::explain` (Phase 13).
+- [ ] Minimal streaming/incremental aggregation mode — still deferred; the
+      engine materializes every operator (see ARCHITECTURE.md).
 
 **Milestone:** Known bugs from the post-1.0.1 review are fixed, an
 `examples/` surface exists for both crates, and SQL/type-gap decisions are
 made deliberately rather than by omission.
+
+## Phase 11 — Recommendations (SQL coverage & comparison rigor)
+
+> Source: review of spec.txt §3/§6, validation-memo.md, docs/benchmarks.md,
+> and docs/v1.1-scope.md, 2026-10-13. These reopen some Phase 10 "deferred"
+> decisions. The Phase 10 checkboxes stay as recorded; each item below
+> supersedes its deferral once done.
+
+### 11a. Verify the comparison claims
+
+- [ ] Ask each consumer (tpt-keystone-db, tpt-aion, tpt-cloud-observability)
+      for the SQL they plan to run; record the list in
+      `docs/consumer-queries.md`. This is the demand gate every deferred
+      feature below depends on.
+- [ ] Add Polars and DuckDB (`duckdb-rs`) to the Phase 0 comparison: same
+      "point at data" case, same broken queries; record dependency count,
+      debug and release compile time, and error text. Update
+      `validation-memo.md` with a dated section.
+- [ ] Re-check the Phase 8 benchmark item: `docs/benchmarks.md` says no direct
+      comparison exists, so the "compare vs. the incumbent" claim is not met.
+      Either add a DataFusion (and ideally Polars) run on the same workloads,
+      or reword the item to say it is not done.
+- [ ] Reconcile CAST: `validation-memo.md` says "add at the SQL layer," but
+      `docs/v1.1-scope.md` does not list CAST. Add a row with a decision, or
+      correct the memo.
+- [ ] Revisit the spec §3 thesis in writing: state the ergonomic win over
+      DataFusion using the consumer query list, not the five-row sample.
+
+### 11b. Expand the SQL subset (ordered by cost)
+
+Start with the parser change, since the cheap predicates fit into it.
+
+- [ ] **OR and parentheses in WHERE.** Replace the flat AND list with an
+      expression tree and precedence (`AND` binds tighter than `OR`). This is
+      the prerequisite for everything below. Tests: precedence, nested parens,
+      mixed AND/OR, rejection of unbalanced parens with a named diagnostic.
+- [x] **IS NULL / IS NOT NULL.** Engine already has null-aware semantics; add
+      a predicate variant. Tests: null vs. non-null rows, with and without
+      GROUP BY. (Done; see Phase 13.)
+- [ ] **IN (...).** Still deferred: needs `OR`, which is not built. **BETWEEN**
+      is done (desugars to two range predicates; see Phase 13).
+- [x] **HAVING.** Apply the existing filter operator to aggregate output. HAVING
+      on an aggregate that is not in SELECT is computed, not rejected. (Done.)
+- [x] **DISTINCT.** Implemented as GROUP BY over the projected columns. (Done.)
+- [ ] **Column-to-column comparisons in WHERE.** Not started.
+- [ ] **LEFT / OUTER JOIN and multiple JOINs.** Engine change: join operator
+      and plan composition. Gate on 11a consumer list; do not start without a
+      real query. Update ARCHITECTURE.md's materialization note when done.
+- [x] **LIKE.** Implemented with `%` and `_` only, as `LIKE` and `NOT LIKE`
+      (added without a consumer gate, on request). Other constructs such as
+      `ESCAPE` are not accepted. (Done.)
+
+### 11c. Types
+
+- [ ] Date/Timestamp: start only after a consumer schema names a real column
+      (per v1.1-scope.md). Write the blast-radius list (Scalar, DataType,
+      arrays, comparisons, format.rs inference, Parquet bridge) before
+      estimating.
+
+### 11d. Documentation and guardrails
+
+- [ ] Update `docs/v1.1-scope.md` with a changelog entry for each item moved
+      out of "deferred."
+- [ ] Update the README "Constructs outside the subset" section as each
+      construct lands; keep the diagnostic tests in
+      `tests/diagnostics.rs` in sync.
+- [ ] Add a SQL support matrix to README.md (supported / deferred / rejected)
+      so users can see the subset without reading the grammar.
+
+**Milestone:** The comparison claims are backed by data, and the SQL subset
+covers the queries the three consumers actually run. Every remaining gap is a
+recorded decision with a named consumer gate.
+
+## Phase 12 — Performance (typed hot paths)
+
+> Source: performance review, 2026-10-13. Baseline (`cargo bench -p
+> tpt-strata --bench queries`, median-ish of 7 samples): GROUP BY 100k rows
+> ~33 ms (~330 ns/row); filter+project+order+limit ~60 ms (~600 ns/row); SQL
+> GROUP BY ~43 ms; equi-join 20k rows ~14 ms (~700 ns/row). Raw run saved to
+> the session scratchpad as `bench_baseline.txt`.
+>
+> Constraint: the core crate stays zero-dependency. `tpt-simd` (GitHub,
+> pre-release v0.1.0, MIT/Apache-2.0) has zero external dependencies in
+> `tpt-simd-vector`, but it is not published and its crates depend on each
+> other by path. It is not added to core. Evaluate it again (see 12e) once
+> it is published and a kernel is measured to need explicit lanes.
+
+### 12a. Aggregate (GROUP BY)
+
+- [ ] Replace per-row `Vec<Scalar>` group keys with borrowed typed key parts
+      (`KeyPart<'a>`): no allocation per row, `&str` keys borrowed from the
+      input batch.
+- [ ] Replace `Box<dyn Accumulator>` per group with typed state vectors
+      indexed by group id (`AggState`), updated by a loop over typed arrays.
+- [ ] Keep semantics: SUM/AVG skip NULL and return NULL for no input; COUNT(*)
+      counts all rows; MIN/MAX skip NULL; global aggregate returns one row
+      over zero rows.
+- [ ] Group output order is first-seen (was HashMap order). Check tests.
+
+### 12b. Filter
+
+- [ ] Evaluate predicates on typed slices, producing a selection vector.
+      Typed fast path for same-type comparisons; generic fallback for mixed
+      types so behaviour is unchanged.
+
+### 12c. Sort and join
+
+- [ ] Sort: sort an index vector with a typed comparator over the merged key
+      columns, then `take` once per column (no per-value `Scalar` clones).
+      Keep NULLS FIRST ascending.
+- [ ] Join: build the hash index on typed `KeyPart`s instead of `Scalar`
+      (removes the per-probe-row `String` clone). Keep NULL keys excluded.
+
+### 12d. Data movement
+
+- [ ] Measure how much time `DataSource::execute` and SQL bind spend cloning
+      batches (`batches().to_vec()`, `Vec<Batch>::clone`). If significant,
+      share column storage behind `Arc`.
+
+### 12e. Evaluate tpt-simd (optional, after publication)
+
+- [ ] Once tpt-simd is published on crates.io, decide whether to add it as an
+      optional `simd` feature in the core crate (default build stays
+      zero-dependency). Only if the typed kernels from 12a/12b leave a
+      measured hot loop that benefits from explicit lanes.
+
+### 12f. Measurement
+
+- [ ] Re-run `cargo bench -p tpt-strata` after each item; record before/after
+      ns/row in docs/benchmarks.md with the toolchain and date.
+- [ ] Profile the GROUP BY benchmark with a sampling profiler to confirm the
+      remaining cost after 12a.
+
+**Milestone:** The GROUP BY, filter, sort, and join paths work on typed data
+with no per-row `Scalar` or `String` allocation, the zero-dependency promise
+still holds, and every number in docs/benchmarks.md is backed by a re-run.
+
+## Phase 13 — Review implementation log (unreleased)
+
+> Work from the 2026-10-13 platform review. Nothing has been tagged, published,
+> or uploaded. `[ ]` means not done.
+
+### Phase A — correctness
+
+- [x] String and boolean range predicates compare; they were always false.
+- [x] `AS` aliases name output columns and work in `ORDER BY` and `HAVING`.
+      Two tests that asserted the old names were corrected.
+- [x] Joins: qualified field names, an ambiguity error, the ON clause accepted
+      in either order, a join-key type check, a duplicate-name error for the
+      builder `join()`, and self-joins rejected with a message.
+- [x] Batches are shared (`Arc`), so a query no longer copies its input.
+      `Table::batches()` returns `&[Arc<Batch>]`.
+- [x] Float keys: `NaN` groups together and `-0.0` groups with `0.0`.
+- [x] Empty inputs (`LIMIT 0`, an empty join side) produce typed empty batches.
+- [x] Comparisons with `NULL` match nothing. `IS [NOT] NULL` added.
+- [x] Integer and float comparisons are exact. `WHERE id > 2.5` works on an
+      integer column.
+- [x] `SUM` over integers returns `Int64` and fails on overflow.
+- [x] Builder: `count_all()`, `project()` after aggregates, and integer literals
+      against float columns. `order_by` is still checked at execute time, which
+      is the only point where aggregate names are known.
+- [x] Qualified `ORDER BY`, `SELECT *, col`, dotted quoted identifiers, and an
+      error for an unknown table qualifier.
+- [x] Lexer: `--` and `/* */` comments, exponent literals, doubled quotes in
+      quoted identifiers. `COUNT(DISTINCT ...)` gets a targeted diagnostic.
+- [x] `Table::concat` accepts inputs that differ only in nullability.
+- [x] Parquet errors are `Io` and `Import`, with `source()` for I/O.
+- [x] `print_table` measures width in characters, shows the header for zero
+      rows, and escapes newlines.
+- [ ] `LIMIT` still reads its whole input; there is no upstream short-circuit.
+- [ ] The literal `-9223372036854775808` still fails, because the minus sign is
+      lexed separately.
+- [ ] `Scalar` display still prints `100.0` as `100`.
+- [ ] `ArrayRef::take` still panics on an out-of-range index.
+
+### Phase B — release readiness (nothing published)
+
+- [x] `cargo publish --dry-run -p tpt-strata` passes. It packages and verifies
+      the crate, and stops before the upload.
+- [ ] `tpt-strata-parquet` dry run: needs `tpt-strata` on crates.io first.
+- [x] CI: tests on Linux, Windows and macOS; a rustdoc job with warnings as errors.
+- [x] `release-check.yml`: runs on `v*` tags or by hand, and never uploads.
+- [x] Dependabot, issue and pull request templates, CODEOWNERS, a Code of Conduct,
+      and an expanded CONTRIBUTING.
+- [ ] CODEOWNERS names `@PhillipC05` as a placeholder. Replace it with the
+      real maintainers.
+- [ ] MSRV 1.75 is not verified here: no 1.75 toolchain is installed locally,
+      and arrow/parquet 55 may need a newer compiler. The CI `msrv` job is the check.
+- [ ] Exact version pins (`=1.0.1`) are unchanged. Revisit when the publish
+      order is settled.
+- [ ] No tags, crates.io entries, or docs.rs builds exist yet.
+
+### Phase C — adoption and features (partly done)
+
+- [x] `Table::from_rows`, `Table::rename_columns`.
+- [x] CSV reading and writing with no dependencies (`tpt_strata::csv`).
+- [x] Parquet: widened types, `read_parquet_columns`, `read_parquet_bytes`,
+      `write_parquet`, with round-trip tests.
+- [x] `strata` command-line tool: SQL over CSV and Parquet, joins across
+      files, `--explain`, `--check`, `--csv`, and a prompt. Not published.
+- [x] `SqlContext::explain` prints the physical plan.
+- [x] v1.1 SQL: `IS [NOT] NULL`, `BETWEEN`, `[NOT] LIKE`, `DISTINCT`, `HAVING`,
+      `OFFSET`, and several `ORDER BY` keys.
+- [ ] Still deferred: `OR`, `IN`, parentheses in `WHERE`, `LEFT`/multiple joins,
+      column-to-column comparisons, `CAST`, and arithmetic in `SELECT`.
+- [ ] Phase 12 performance items (typed group keys, typed filter kernels,
+      top-k sort, typed join keys) are not done. The measured gain came from
+      shared batches and typed gathers, which is part of 12c and 12d.
+- [ ] Parquet row-group streaming is not done. The whole file is read into memory.
+- [ ] JSON ingest is not done.
+
+### Phase D — innovation (a small set)
+
+- [x] `SqlContext::check` binds a query without running it, for use in CI.
+- [x] `QueryError::kind()` gives stable, machine-readable error names.
+- [x] WASM build and browser playground (`tpt-strata-wasm`, `playground/`),
+      with a Node smoke test. The page has not been opened in a browser.
+- [x] Python bindings (`tpt-strata-python`, built with maturin): 16 tests pass.
+- [x] Serde support (`tpt-strata-serde`): flat structs to tables and back.
+- [ ] Not started: a derive macro and per-error explanation pages.
+
+### Phase E — examples and templates
+
+- [x] Examples: `csv_analytics` and `joins_and_aliases`, with sample CSVs in
+      `crates/tpt-strata/examples/data`.
+- [x] Docs: `docs/quickstart.md`, `docs/cookbook.md`, `docs/faq.md`.
+- [x] `templates/embedded-analytics`: a starter project, excluded from the
+      workspace. It builds and runs.
+- [x] Comparison benchmark against DataFusion and DuckDB (`bench/compare`,
+      results in `docs/benchmark-comparison.md`). tpt-strata is slower on these
+      analytic queries; the write-up says by how much.
+- [ ] Not done: `docs/consumer-queries.md`, which needs the consumers' own queries.
+
+### Verification
+
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo test --workspace`, and `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings`
+  all pass.
+- `cargo bench -p tpt-strata --bench queries` was re-run. The figures are in
+  docs/benchmarks.md, with the caveat that they are not a same-session comparison.

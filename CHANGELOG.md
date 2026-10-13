@@ -4,10 +4,52 @@ All notable changes to tpt-strata will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+Each crate also keeps its own changelog, with only the changes that affect it:
+[`tpt-strata`](crates/tpt-strata/CHANGELOG.md) and
+[`tpt-strata-parquet`](crates/tpt-strata-parquet/CHANGELOG.md). This file
+records workspace-wide changes (CI, docs, licensing, and release-level notes).
+
 ## [Unreleased]
+
+### Changed
+
+- **Behavior change:** `AS` aliases now name output columns. They were parsed
+  and ignored before, so `SUM(x) AS total` came back as `SUM(x)`.
+- **Behavior change:** `SUM` over an integer column returns `Int64` (it was
+  `Float64`), and overflow is an error instead of a rounded result.
+- **Behavior change:** a comparison with `NULL` (`= NULL`, `!= NULL`) matches no
+  rows. Use `IS NULL` / `IS NOT NULL`.
+- `Table::batches()` returns `&[Arc<Batch>]`. Tables and sources share batches,
+  so queries no longer copy the input.
+- `JoinExec::new` is replaced by `JoinExec::try_new`, which validates keys and
+  output names.
+- `print_table` measures width in characters, shows the header for a zero-row
+  result, and escapes embedded newlines.
+- Parquet errors are now `QueryError::Io` and `QueryError::Import` (see the
+  bridge changelog).
 
 ### Fixed
 
+- String and boolean range predicates (`>`, `>=`, `<`, `<=`) always returned no
+  rows. They now compare in string and boolean order.
+- Joins with a shared column name resolved to the wrong side. Qualified names
+  resolve correctly, `ON b.id = a.id` works in either order, and an ambiguous
+  unqualified name is an error that lists the choices.
+- Float keys: `NaN` values now group and join together, and `-0.0` groups with
+  `0.0`. Equality and hashing agree.
+- `LIMIT 0`, and joins with an empty side, could panic in `ORDER BY` or
+  projection. Empty results keep their schema.
+- Integer comparisons go through exact integer arithmetic, so values above
+  2^53 compare correctly. `WHERE id > 2.5` works on an integer column.
+- `ORDER BY t.col` (qualified) now resolves. `SELECT *, col` keeps `col`.
+  Quoted identifiers containing a dot (`"http.status"`) resolve as one name.
+- Table-qualified references with an unknown table now report a missing column
+  instead of silently using the bare name.
+- `Table::concat` accepts inputs that differ only in nullability.
+- Builder `project()` after an aggregate works; it was ignored.
+- The "Did you mean" suggestion is separated from the column list by a full stop.
+- `Array::get` and `is_null` return null for an out-of-range index instead of
+  panicking.
 - `ORDER BY` no longer mishandles `NULL`: nulls now sort **first** ascending
   (`NULLS FIRST`) and last descending, instead of landing in an arbitrary
   position via `scalar_cmp`'s equal-for-incomparable fallback. New
@@ -25,6 +67,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `tpt-strata-serde`: convert flat structs to a table (`to_table`) and read
+  query results back into structs (`from_table`). Not published.
+- `tpt-strata-wasm` and a browser playground in `playground/`: the engine
+  compiled to WebAssembly, with a Node smoke test. Not published.
+- `tpt-strata-python`: Python bindings (`import tpt_strata`) built with maturin,
+  with `Table`, `sql`, `explain`, `check`, and `StrataError` carrying `kind`.
+  Not published.
+- `bench/compare`: a head-to-head benchmark of tpt-strata, DataFusion and DuckDB
+  on the same Parquet data. See `docs/benchmark-comparison.md`.
+- SQL: `IS [NOT] NULL`, `BETWEEN`, `[NOT] LIKE` (`%` and `_`), `DISTINCT`,
+  `HAVING` (on any aggregate, even one not in `SELECT`), `OFFSET`, several
+  `ORDER BY` keys, `COUNT(DISTINCT ...)` diagnostic, and `--`/`/* */` comments.
+- CSV: `tpt_strata::csv::parse_csv` (type inference, quoting, NULL for empty
+  fields) and `to_csv`. No dependencies.
+- `Table::from_rows`, `Table::rename_columns`, `QueryBuilder::count_all()`.
+- `SqlContext::explain` prints the physical plan; `SqlContext::check` binds a
+  query without running it, for CI.
+- `QueryError::kind()` returns a stable kebab-case name for each error kind.
+- `strata` command-line tool (`crates/tpt-strata-cli`): SQL over CSV and
+  Parquet files, joins across files, `--explain`, `--check`, `--csv`, and a
+  prompt. Not published.
+- Documentation: `docs/quickstart.md`, `docs/cookbook.md`, `docs/faq.md`; the
+  `examples/csv_analytics.rs` and `examples/joins_and_aliases.rs` examples with
+  sample data; the `templates/embedded-analytics` starter project.
+- CI: tests on Linux, Windows and macOS; a rustdoc job that fails on warnings;
+  a release-check workflow that verifies packaging and never uploads; dependabot;
+  issue and pull request templates; CODEOWNERS.
 - Targeted SQL diagnostics for the deliberately-deferred v1.1 constructs:
   `OR`, parentheses, `IS NULL`/`IS NOT NULL`, `IN`, `BETWEEN`, `LIKE`,
   `DISTINCT`, `HAVING`, `LEFT`/`OUTER` joins, multiple joins, and

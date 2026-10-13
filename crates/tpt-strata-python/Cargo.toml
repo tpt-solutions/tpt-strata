@@ -1,0 +1,23 @@
+[package]
+name = "tpt-strata-python"
+description = "Python bindings for tpt-strata: SQL over tables, CSV and Parquet, from Python"
+# Not inherited from the workspace: this crate is excluded from it, because
+# building the Python extension needs its own feature set.
+version = "1.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-strata"
+homepage = "https://github.com/tpt-solutions/tpt-strata"
+# Not yet released. Remove this line when the package is ready to publish.
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
+tpt-strata-parquet = { version = "=1.0.1", path = "../tpt-strata-parquet" }
+pyo3 = "0.29"

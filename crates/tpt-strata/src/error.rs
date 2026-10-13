@@ -19,6 +19,13 @@ pub enum QueryError {
     UnsupportedOperation { message: String },
     /// The SQL string could not be parsed.
     Sql { message: String },
+    /// Reading or writing a file failed at the operating-system level.
+    Io {
+        context: String,
+        source: std::io::Error,
+    },
+    /// A file was readable but could not be decoded (corrupt or unexpected format).
+    Import { message: String },
 }
 
 impl fmt::Display for QueryError {
@@ -31,7 +38,7 @@ impl fmt::Display for QueryError {
                     available.join(", ")
                 )?;
                 if let Some(s) = suggest_closest(column, available) {
-                    write!(f, " Did you mean '{s}'?")?;
+                    write!(f, ". Did you mean '{s}'?")?;
                 }
                 Ok(())
             }
@@ -50,13 +57,36 @@ impl fmt::Display for QueryError {
                 write!(f, "Unsupported operation: {message}")
             }
             QueryError::Sql { message } => write!(f, "SQL error: {message}"),
+            QueryError::Io { context, source } => write!(f, "I/O error: {context}: {source}"),
+            QueryError::Import { message } => write!(f, "Import error: {message}"),
         }
     }
 }
 
-impl std::error::Error for QueryError {}
+impl std::error::Error for QueryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            QueryError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl QueryError {
+    /// A stable, machine-readable name for the kind of error, for tools that
+    /// branch on it (editors, CI, dashboards). Names are kebab-case and do not
+    /// change between releases. Message text may change, so do not parse it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            QueryError::MissingColumn { .. } => "missing-column",
+            QueryError::TypeMismatch { .. } => "type-mismatch",
+            QueryError::UnsupportedOperation { .. } => "unsupported",
+            QueryError::Sql { .. } => "sql",
+            QueryError::Io { .. } => "io",
+            QueryError::Import { .. } => "import",
+        }
+    }
+
     /// Internal "should never happen" path: an `ArrayRef` downcast reached a
     /// variant that contradicts the type checks enforced at the data boundary.
     ///

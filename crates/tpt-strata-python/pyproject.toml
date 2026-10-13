@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tpt-strata"
+version = "1.0.1"
+description = "Embeddable columnar SQL over CSV, Parquet and Python rows, with zero-dependency Rust core"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "TPT Solutions" }]
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Development Status :: 4 - Beta",
+]
+
+[tool.maturin]
+module-name = "tpt_strata._native"
+python-source = "python"
+features = ["pyo3/extension-module"]

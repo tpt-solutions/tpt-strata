@@ -1,0 +1,29 @@
+# Release check: verifies that the crates package and that a publish would
+# succeed. It never uploads anything. Publishing stays a manual decision.
+#
+# Runs on version tags and on demand.
+name: Release check
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Package and dry-run publish (no upload)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Builds the packaged crate from scratch, then stops before uploading.
+      - run: cargo publish --dry-run -p tpt-strata
+      # The Parquet bridge depends on tpt-strata =1.0.1 from crates.io, so its
+      # dry run only works after tpt-strata is published. Until then, check
+      # that the package contents are right.
+      - run: cargo package --list -p tpt-strata-parquet
+      - run: cargo package --list -p tpt-strata-cli

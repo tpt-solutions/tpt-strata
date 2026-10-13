@@ -69,3 +69,17 @@ cargo bench -p tpt-strata --bench queries   # this suite only
 Numbers are captured manually in this file per environment so they can be
 traced to a toolchain and date. Recapture and update the table above whenever
 changes land that materially affect the engine's hot path.
+
+## Re-run after the review fixes (2026-10-13)
+
+Run with `cargo bench -p tpt-strata --bench queries` in one session, after the
+engine moved to shared batches and typed gathers (Phase 13 of todo.md). Times
+are the per-op figures printed by the harness; they are not a same-session
+rerun of the earlier numbers above, so treat the ratio as indicative.
+
+| Workload | Earlier (todo.md Phase 12 baseline) | Now | Notes |
+|---|---|---|---|
+| GROUP BY SUM, 100k rows | ~33 ms (~330 ns/row) | ~10 ms (~100 ns/row) | Typed key path not yet done (Phase 12a) |
+| filter + project + order + limit, 100k rows | ~60 ms (~600 ns/row) | ~31 ms (~310 ns/row) | Sort is now a typed gather |
+| SQL GROUP BY, 100k rows | ~43 ms | ~20 ms | |
+| Equi-join, 20k x 5 rows | ~14 ms (~700 ns/row) | ~4.5 ms (~220 ns/row) | Join output gathered by position |

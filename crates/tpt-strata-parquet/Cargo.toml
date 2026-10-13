@@ -8,9 +8,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
-readme = "../../README.md"
+keywords = ["parquet", "arrow", "columnar", "import", "tpt-strata"]
+categories = ["database", "encoding"]
+readme = "README.md"
 documentation = "https://docs.rs/tpt-strata-parquet"
 
 [package.metadata.docs.rs]
@@ -21,3 +21,4 @@ rustdoc-args = ["--cfg", "docsrs"]
 tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
 parquet = { workspace = true }
 arrow = { version = "55", default-features = false }
+bytes = "1"

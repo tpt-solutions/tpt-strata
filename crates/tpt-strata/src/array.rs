@@ -190,16 +190,21 @@ macro_rules! impl_array {
                 self.0.is_empty()
             }
 
+            /// Out-of-range indices count as null rather than panicking.
             fn is_null(&self, i: usize) -> bool {
-                self.0[i].is_none()
+                self.0.get(i).map_or(true, |v| v.is_none())
             }
 
             fn null_count(&self) -> usize {
                 self.0.iter().filter(|v| v.is_none()).count()
             }
 
+            /// Returns `None` for a null value and for an out-of-range index.
             fn get(&self, i: usize) -> Option<Scalar> {
-                self.0[i].as_ref().map(|v| Scalar::$scalar(v.clone()))
+                self.0
+                    .get(i)
+                    .and_then(|v| v.as_ref())
+                    .map(|v| Scalar::$scalar(v.clone()))
             }
         }
 
@@ -227,3 +232,14 @@ impl_array!(I32Array, Int32, DataType::Int32, i32, I32);
 impl_array!(I64Array, Int64, DataType::Int64, i64, I64);
 impl_array!(F64Array, Float64, DataType::Float64, f64, F64);
 impl_array!(StrArray, Utf8, DataType::Utf8, String, Str);
+
+/// A zero-length array of the given type.
+pub(crate) fn empty_array(data_type: DataType) -> ArrayRef {
+    match data_type {
+        DataType::Boolean => ArrayRef::Boolean(BoolArray(Vec::new())),
+        DataType::Int32 => ArrayRef::Int32(I32Array(Vec::new())),
+        DataType::Int64 => ArrayRef::Int64(I64Array(Vec::new())),
+        DataType::Float64 => ArrayRef::Float64(F64Array(Vec::new())),
+        DataType::Utf8 => ArrayRef::Utf8(StrArray(Vec::new())),
+    }
+}

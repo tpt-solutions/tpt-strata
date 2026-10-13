@@ -55,8 +55,11 @@ Dependency direction: the upper modules are layers over the lower ones.
   like*: a `Batch` is a fixed schema plus one `Vec<Option<T>>`-backed array
   per field. Null is explicit; there is no sentinel value.
 - **Engine** (`engine.rs`) defines *how it moves*: every operator implements
-  the `PhysicalPlan` trait (`schema()` + `execute()`), taking an input plan
-  and producing `Vec<Batch>`.
+  the `PhysicalPlan` trait (`schema()` + `execute()` + `explain()`), taking an
+  input plan and producing `Vec<Arc<Batch>>`. Batches are shared handles, so
+  a source hands its data to the plan without copying it. Operators build
+  their output columns by gathering values from input positions, without
+  boxing each value as a `Scalar`.
 - The only contract between layers is `Batch`. No operator depends on what
   produced its input, and no operator knows about SQL, the builder, or
   Parquet.

@@ -1,0 +1,11 @@
+order_id,customer_id,product,quantity,unit_price,region
+1001,1,widget,4,2.50,north
+1002,2,gadget,1,19.99,south
+1003,1,gadget,2,19.99,north
+1004,3,widget,10,2.50,east
+1005,2,doohickey,3,7.00,south
+1006,4,widget,,2.50,west
+1007,3,gadget,5,19.99,east
+1008,5,doohickey,1,7.00,north
+1009,1,widget,6,2.50,north
+1010,4,gadget,2,19.99,west

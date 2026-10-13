@@ -1,5 +1,5 @@
-use crate::array::{ArrayRef, BoolArray, F64Array, I32Array, I64Array, StrArray};
-use crate::batch::Batch;
+use crate::array::{empty_array, ArrayRef, BoolArray, F64Array, I32Array, I64Array, StrArray};
+use crate::batch::{Batch, BatchRef};
 use crate::error::QueryError;
 use crate::schema::{DataType, Field, Schema};
 use crate::types::Scalar;
@@ -24,17 +24,21 @@ impl Column {
 }
 
 /// The result of executing a query: a schema plus one or more batches.
+///
+/// Batches are shared (`Arc`), so cloning a table or reading it into a query
+/// does not copy column data.
 #[derive(Debug, Clone)]
 pub struct Table {
     schema: Arc<Schema>,
-    batches: Vec<Batch>,
+    batches: Vec<BatchRef>,
 }
 
 impl Table {
     /// Build a table from value-based columns, inferring the schema.
     ///
     /// Returns an error if a column is entirely null/empty (type cannot be
-    /// inferred) or if columns have differing lengths.
+    /// inferred) or if columns have differing lengths. Use [`Table::from_rows`]
+    /// for row-oriented data, or build [`Batch`]es directly for an explicit schema.
     pub fn try_new(columns: Vec<Column>) -> Result<Self, QueryError> {
         let row_count = columns.first().map_or(0, |c| c.values.len());
         for col in &columns {
@@ -100,23 +104,78 @@ impl Table {
         let batch = Batch::try_new(schema.clone(), arrays)?;
         Ok(Table {
             schema,
-            batches: vec![batch],
+            batches: vec![Arc::new(batch)],
         })
+    }
+
+    /// Build a table from row-oriented data.
+    ///
+    /// `names` gives the column names. Each row must supply one value per
+    /// name. Types are inferred per column exactly as in [`Table::try_new`].
+    ///
+    /// ```rust
+    /// use tpt_strata::{Scalar, Table};
+    ///
+    /// let t = Table::from_rows(
+    ///     &["city", "pop"],
+    ///     vec![
+    ///         vec![Scalar::Str("nyc".into()), Scalar::I64(8_000_000)],
+    ///         vec![Scalar::Str("sfo".into()), Scalar::I64(800_000)],
+    ///     ],
+    /// ).unwrap();
+    /// assert_eq!(t.row_count(), 2);
+    /// ```
+    pub fn from_rows(names: &[&str], rows: Vec<Vec<Scalar>>) -> Result<Self, QueryError> {
+        let mut values: Vec<Vec<Scalar>> = (0..names.len())
+            .map(|_| Vec::with_capacity(rows.len()))
+            .collect();
+        for (i, row) in rows.into_iter().enumerate() {
+            if row.len() != names.len() {
+                return Err(QueryError::UnsupportedOperation {
+                    message: format!(
+                        "row {} has {} values but {} columns were named",
+                        i + 1,
+                        row.len(),
+                        names.len()
+                    ),
+                });
+            }
+            for (col, v) in values.iter_mut().zip(row) {
+                col.push(v);
+            }
+        }
+        let columns = names
+            .iter()
+            .zip(values)
+            .map(|(name, vals)| Column::new(*name, vals))
+            .collect();
+        Self::try_new(columns)
     }
 
     /// Build a table from batches with a shared schema.
     pub fn from_batches(schema: Arc<Schema>, batches: Vec<Batch>) -> Self {
+        Self {
+            schema,
+            batches: batches.into_iter().map(Arc::new).collect(),
+        }
+    }
+
+    /// Build a table from batches that are already shared.
+    pub fn from_shared_batches(schema: Arc<Schema>, batches: Vec<BatchRef>) -> Self {
         Self { schema, batches }
     }
 
     /// An empty table with a declared schema (for all-null/empty inputs).
     pub fn empty(schema: Arc<Schema>) -> Self {
-        let fields = schema.fields.clone();
-        let arrays: Vec<ArrayRef> = fields.iter().map(|f| empty_array(f.data_type)).collect();
+        let arrays: Vec<ArrayRef> = schema
+            .fields
+            .iter()
+            .map(|f| empty_array(f.data_type))
+            .collect();
         let batch = Batch::new_unchecked(schema.clone(), arrays);
         Self {
             schema,
-            batches: vec![batch],
+            batches: vec![Arc::new(batch)],
         }
     }
 
@@ -126,7 +185,7 @@ impl Table {
     }
 
     /// The batches that hold the table's data.
-    pub fn batches(&self) -> &[Batch] {
+    pub fn batches(&self) -> &[BatchRef] {
         &self.batches
     }
 
@@ -153,16 +212,63 @@ impl Table {
         })
     }
 
-    /// Concatenate two tables with identical schemas into a single table.
+    /// Return a copy of this table with its columns renamed, in order.
+    ///
+    /// Use this to make two tables' column names distinct before a join.
+    pub fn rename_columns(&self, names: &[&str]) -> Result<Table, QueryError> {
+        if names.len() != self.schema.len() {
+            return Err(QueryError::UnsupportedOperation {
+                message: format!(
+                    "rename_columns needs {} names but got {}",
+                    self.schema.len(),
+                    names.len()
+                ),
+            });
+        }
+        let fields: Vec<Field> = self
+            .schema
+            .fields
+            .iter()
+            .zip(names)
+            .map(|(f, n)| Field::new(*n, f.data_type, f.nullable))
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        let batches = self
+            .batches
+            .iter()
+            .map(|b| Arc::new(Batch::new_unchecked(schema.clone(), b.columns.clone())))
+            .collect();
+        Ok(Table::from_shared_batches(schema, batches))
+    }
+
+    /// Concatenate two tables with the same column names and types.
+    ///
+    /// Nullability may differ: the result marks a column nullable if either
+    /// input does.
     pub fn concat(&self, other: &Table) -> Result<Table, QueryError> {
-        if self.schema != other.schema {
+        let same_shape = self.schema.len() == other.schema.len()
+            && self
+                .schema
+                .fields
+                .iter()
+                .zip(&other.schema.fields)
+                .all(|(a, b)| a.name == b.name && a.data_type == b.data_type);
+        if !same_shape {
             return Err(QueryError::UnsupportedOperation {
                 message: "cannot concatenate tables with different schemas".to_string(),
             });
         }
+        let fields: Vec<Field> = self
+            .schema
+            .fields
+            .iter()
+            .zip(&other.schema.fields)
+            .map(|(a, b)| Field::new(a.name.clone(), a.data_type, a.nullable || b.nullable))
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
         let mut batches = self.batches.clone();
         batches.extend(other.batches.iter().cloned());
-        Ok(Table::from_batches(self.schema.clone(), batches))
+        Ok(Table::from_shared_batches(schema, batches))
     }
 }
 
@@ -221,84 +327,76 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
     }
 }
 
-fn empty_array(data_type: DataType) -> ArrayRef {
-    match data_type {
-        DataType::Boolean => ArrayRef::Boolean(BoolArray(Vec::new())),
-        DataType::Int32 => ArrayRef::Int32(I32Array(Vec::new())),
-        DataType::Int64 => ArrayRef::Int64(I64Array(Vec::new())),
-        DataType::Float64 => ArrayRef::Float64(F64Array(Vec::new())),
-        DataType::Utf8 => ArrayRef::Utf8(StrArray(Vec::new())),
-    }
-}
-
-/// Print a table to stdout in a formatted grid.
-pub fn print_table(table: &Table) {
-    if table.schema.is_empty() || table.row_count() == 0 {
-        println!("(empty result)");
-        return;
+/// Render a table as a grid of text, as [`print_table`] prints it.
+///
+/// Column widths count characters, not bytes, so non-ASCII values line up.
+/// Newlines inside values are shown as `\n`. A zero-row result still shows
+/// its header.
+pub fn render_table(table: &Table) -> String {
+    let fields = &table.schema.fields;
+    if fields.is_empty() {
+        return "(no columns)\n".to_string();
     }
 
-    // Collect all row values as strings in column order.
-    let mut col_strs: Vec<Vec<String>> = (0..table.schema.len()).map(|_| Vec::new()).collect();
+    let mut cells: Vec<Vec<String>> = (0..fields.len()).map(|_| Vec::new()).collect();
     for batch in table.batches() {
-        let rows = batch.row_count();
-        for r in 0..rows {
+        for r in 0..batch.row_count() {
             for (ci, col) in batch.columns.iter().enumerate() {
-                match col.get(r) {
-                    Some(v) => col_strs[ci].push(format!("{v}")),
-                    None => col_strs[ci].push("NULL".to_string()),
-                }
+                let text = match col.get(r) {
+                    Some(v) => v.to_string(),
+                    None => "NULL".to_string(),
+                };
+                cells[ci].push(text.replace('\n', "\\n"));
             }
         }
     }
 
-    let widths: Vec<usize> = table
-        .schema
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(ci, f)| {
-            let data_width = col_strs[ci].iter().map(|s| s.len()).max().unwrap_or(0);
-            f.name.len().max(data_width)
+    let header: Vec<String> = fields.iter().map(|f| f.name.replace('\n', "\\n")).collect();
+    let widths: Vec<usize> = (0..fields.len())
+        .map(|ci| {
+            let data = cells[ci]
+                .iter()
+                .map(|s| display_width(s))
+                .max()
+                .unwrap_or(0);
+            display_width(&header[ci]).max(data)
         })
         .collect();
 
-    print!("+");
-    for w in &widths {
-        print!("{}+", "-".repeat(w + 2));
-    }
-    println!();
-
-    print!("|");
-    for (f, w) in table.schema.fields.iter().zip(&widths) {
-        print!(" {} {} |", f.name, " ".repeat(w - f.name.len()));
-    }
-    println!();
-
-    print!("+");
-    for w in &widths {
-        print!("{}+", "-".repeat(w + 2));
-    }
-    println!();
-
-    let n_rows = col_strs.first().map_or(0, Vec::len);
-    // Invariant: every column holds exactly `n_rows` values. Batches enforce
-    // equal column lengths (in `Batch::try_new`), and this loop pushed one
-    // value per row per column above, so the iterators below stay aligned.
-    debug_assert!(col_strs.iter().all(|c| c.len() == n_rows));
-    let mut col_iters: Vec<_> = col_strs.iter().map(|c| c.iter()).collect();
-    for _ in 0..n_rows {
-        print!("|");
-        for (ci, w) in widths.iter().enumerate() {
-            let val = col_iters[ci].next().expect("equal column lengths");
-            print!(" {} {} |", val, " ".repeat(w.saturating_sub(val.len())));
+    let mut out = String::new();
+    let rule: String = {
+        let parts: Vec<String> = widths.iter().map(|w| "-".repeat(w + 2)).collect();
+        format!("+{}+\n", parts.join("+"))
+    };
+    let line = |vals: &[&str]| -> String {
+        let mut s = String::from("|");
+        for (v, w) in vals.iter().zip(&widths) {
+            s.push_str(&format!(" {v}{} |", " ".repeat(w - display_width(v))));
         }
-        println!();
-    }
+        s.push('\n');
+        s
+    };
 
-    print!("+");
-    for w in &widths {
-        print!("{}+", "-".repeat(w + 2));
+    out.push_str(&rule);
+    let header_refs: Vec<&str> = header.iter().map(String::as_str).collect();
+    out.push_str(&line(&header_refs));
+    out.push_str(&rule);
+    for r in 0..table.row_count() {
+        let row: Vec<&str> = cells.iter().map(|c| c[r].as_str()).collect();
+        out.push_str(&line(&row));
     }
-    println!();
+    out.push_str(&rule);
+    if table.row_count() == 0 {
+        out.push_str("(0 rows)\n");
+    }
+    out
+}
+
+fn display_width(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// Print a table to stdout in a formatted grid. See [`render_table`].
+pub fn print_table(table: &Table) {
+    print!("{}", render_table(table));
 }

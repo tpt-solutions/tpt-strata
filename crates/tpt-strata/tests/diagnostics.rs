@@ -154,33 +154,31 @@ fn snapshot_v1_1_or_in_where() {
 }
 
 #[test]
-fn snapshot_v1_1_is_null_in_where() {
+fn snapshot_v1_1_in_where_still_rejected() {
+    // IN needs OR-style boolean logic, which is still outside the v1.1 subset.
     let err = ctx()
-        .run("SELECT * FROM employees WHERE department IS NOT NULL")
+        .run("SELECT * FROM employees WHERE years IN (1, 2)")
         .unwrap_err();
     let text = err.to_string();
     assert!(
-        text.contains("'IS NULL / IS NOT NULL' is not supported")
-            && text.contains("sentinel value"),
+        text.contains("'IN (...)' is not supported in tpt-strata v1.1")
+            && text.contains("docs/v1.1-scope.md"),
         "unexpected diagnostic: {text}"
     );
 }
 
 #[test]
-fn snapshot_v1_1_in_between_like_in_where() {
-    for sql in [
-        "SELECT * FROM employees WHERE years IN (1, 2)",
-        "SELECT * FROM employees WHERE years BETWEEN 1 AND 2",
-        "SELECT * FROM employees WHERE department LIKE 'e%'",
-    ] {
-        let err = ctx().run(sql).unwrap_err();
-        let text = err.to_string();
-        assert!(
-            text.contains("is not supported in tpt-strata v1.1")
-                && text.contains("docs/v1.1-scope.md"),
-            "unexpected diagnostic for {sql}: {text}"
-        );
-    }
+fn is_null_between_and_like_in_where_are_supported() {
+    // Shipped in the v1.1 subset: these must run, not be rejected.
+    let c = ctx();
+    let nulls = c
+        .run("SELECT * FROM employees WHERE department IS NOT NULL")
+        .unwrap();
+    assert!(nulls.row_count() <= 4);
+    c.run("SELECT * FROM employees WHERE years BETWEEN 1 AND 2")
+        .unwrap();
+    c.run("SELECT * FROM employees WHERE department LIKE 'e%'")
+        .unwrap();
 }
 
 #[test]
@@ -210,27 +208,24 @@ fn snapshot_v1_1_column_to_column_comparison() {
 }
 
 #[test]
-fn snapshot_v1_1_distinct() {
-    let err = ctx()
+fn distinct_is_supported_as_group_by() {
+    let out = ctx()
         .run("SELECT DISTINCT department FROM employees")
-        .unwrap_err();
-    let text = err.to_string();
-    assert!(
-        text.contains("'DISTINCT' is not supported") && text.contains("GROUP BY"),
-        "unexpected diagnostic: {text}"
-    );
+        .unwrap();
+    assert_eq!(out.row_count(), 2);
 }
 
 #[test]
-fn snapshot_v1_1_having() {
-    let err = ctx()
-        .run("SELECT department FROM employees GROUP BY department HAVING COUNT(*)> 1")
-        .unwrap_err();
-    let text = err.to_string();
-    assert!(
-        text.contains("'HAVING' is not supported") && text.contains("nest two queries"),
-        "unexpected diagnostic: {text}"
-    );
+fn having_filters_aggregates() {
+    // Each department has one row, so COUNT(*) is 1 for both groups.
+    let out = ctx()
+        .run("SELECT department FROM employees GROUP BY department HAVING COUNT(*) >= 1")
+        .unwrap();
+    assert_eq!(out.row_count(), 2);
+    let having_none = ctx()
+        .run("SELECT department FROM employees GROUP BY department HAVING COUNT(*) > 1")
+        .unwrap();
+    assert_eq!(having_none.row_count(), 0);
 }
 
 #[test]

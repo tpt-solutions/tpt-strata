@@ -1,0 +1,8 @@
+# Default reviewers for every file.
+# GitHub requires an organisation team in the form @org/team for CODEOWNERS.
+# Replace `maintainers` with the real team name in the tpt-solutions organisation.
+*                            @tpt-solutions/maintainers
+
+# The core engine, its SQL surface, and the bridges deserve the closest review.
+/crates/tpt-strata/src/      @tpt-solutions/maintainers
+/crates/tpt-strata-parquet/  @tpt-solutions/maintainers

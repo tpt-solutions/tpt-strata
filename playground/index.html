@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tpt-strata playground</title>
+  <style>
+    :root { color-scheme: light dark; --gap: 16px; --border: #8884; --accent: #2563eb; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: var(--gap); line-height: 1.4; }
+    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    p.lead { margin: 0 0 var(--gap); opacity: .8; }
+    .layout { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1.2fr); gap: var(--gap); }
+    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+    fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 0 0 var(--gap); }
+    legend { padding: 0 6px; font-weight: 600; }
+    label { display: block; font-size: .85rem; margin-bottom: 4px; }
+    input[type=text], textarea, select {
+      width: 100%; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: inherit;
+    }
+    textarea { min-height: 96px; resize: vertical; }
+    textarea.sql { min-height: 120px; }
+    .table-block { border: 1px dashed var(--border); border-radius: 6px; padding: 8px; margin-bottom: 8px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    button {
+      font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent);
+      background: var(--accent); color: #fff; cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--accent); }
+    button:disabled { opacity: .5; cursor: default; }
+    .out { overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; min-height: 120px; }
+    table { border-collapse: collapse; font-size: 13px; width: 100%; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { font-weight: 600; }
+    td.null { opacity: .5; font-style: italic; }
+    pre { margin: 0; font: 13px ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow: auto; }
+    .error { color: #dc2626; white-space: pre-wrap; font: 13px ui-monospace, Menlo, Consolas, monospace; }
+    .meta { font-size: .8rem; opacity: .7; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>tpt-strata playground</h1>
+  <p class="lead">Edit the tables as CSV, write SQL, and run it. Everything runs in your browser; no data leaves the page.</p>
+
+  <div class="layout">
+    <div>
+      <fieldset>
+        <legend>Tables</legend>
+        <div class="row" style="margin-bottom:8px">
+          <label style="flex:1 1 220px">Example
+            <select id="example"></select>
+          </label>
+          <button class="secondary" id="load-example" type="button">Load</button>
+        </div>
+        <div id="tables"></div>
+        <button class="secondary" id="add-table" type="button">Add table</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>SQL</legend>
+        <textarea class="sql" id="sql" spellcheck="false"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button id="run" type="button">Run</button>
+          <button class="secondary" id="explain" type="button">Explain</button>
+          <button class="secondary" id="check" type="button">Check</button>
+        </div>
+      </fieldset>
+    </div>
+
+    <div>
+      <fieldset>
+        <legend>Result</legend>
+        <div class="out" id="out"><span style="opacity:.6">Run a query to see results.</span></div>
+        <div class="meta" id="meta"></div>
+      </fieldset>
+    </div>
+  </div>
+
+  <script type="module">
+    import init, { run, explain_query, check_query, version } from "./pkg/tpt_strata_wasm.js";
+
+    const EXAMPLES = {
+      "Orders and customers (join)": {
+        tables: {
+          orders: "order_id,customer_id,product,quantity,unit_price,region\n1001,1,widget,4,2.50,north\n1002,2,gadget,1,19.99,south\n1003,1,gadget,2,19.99,north\n1004,3,widget,10,2.50,east\n1005,2,doohickey,3,7.00,south\n1006,4,widget,,2.50,west\n1007,3,gadget,5,19.99,east\n1008,5,doohickey,1,7.00,north\n1009,1,widget,6,2.50,north\n1010,4,gadget,2,19.99,west\n",
+          customers: "customer_id,name,tier\n1,Ada Lovelace,gold\n2,Grace Hopper,silver\n3,Alan Turing,gold\n4,Edsger Dijkstra,bronze\n5,Barbara Liskov,silver\n",
+        },
+        sql: "SELECT customers.name, customers.tier, SUM(orders.quantity) AS units\nFROM orders JOIN customers ON orders.customer_id = customers.customer_id\nGROUP BY customers.name, customers.tier\nHAVING SUM(orders.quantity) >= 3\nORDER BY units DESC",
+      },
+      "Sensor readings (NULLs, LIKE, paging)": {
+        tables: {
+          readings: "sensor,site,celsius,ok\nt-01,north-1,21.5,true\nt-02,north-2,,false\nt-03,south-1,30.25,false\nt-11,north-3,18,true\n",
+        },
+        sql: "SELECT sensor, celsius FROM readings\nWHERE sensor LIKE 't-%' AND celsius IS NOT NULL\nORDER BY celsius DESC\nLIMIT 2 OFFSET 0",
+      },
+    };
+
+    const $ = (id) => document.getElementById(id);
+    let tableCount = 0;
+
+    function addTable(name = "", csv = "") {
+      const idx = tableCount++;
+      const block = document.createElement("div");
+      block.className = "table-block";
+      block.innerHTML = `
+        <label>Table name <input type="text" class="tname" value="${escapeAttr(name)}"></label>
+        <label>CSV (first row is the header)
+          <textarea class="tcsv" spellcheck="false">${escapeHtml(csv)}</textarea>
+        </label>
+        <button class="secondary remove" type="button" data-idx="${idx}">Remove</button>`;
+      block.querySelector(".remove").addEventListener("click", () => block.remove());
+      $("tables").appendChild(block);
+    }
+
+    function currentTables() {
+      const map = {};
+      for (const block of document.querySelectorAll(".table-block")) {
+        const name = block.querySelector(".tname").value.trim();
+        if (name) map[name] = block.querySelector(".tcsv").value;
+      }
+      return JSON.stringify(map);
+    }
+
+    function setTables(tables) {
+      $("tables").innerHTML = "";
+      for (const [name, csv] of Object.entries(tables)) addTable(name, csv);
+    }
+
+    function showError(message) {
+      $("out").innerHTML = "";
+      const pre = document.createElement("div");
+      pre.className = "error";
+      pre.textContent = message;
+      $("out").appendChild(pre);
+      $("meta").textContent = "";
+    }
+
+    function renderTable(result) {
+      const wrap = document.createElement("table");
+      const head = document.createElement("tr");
+      for (const c of result.columns) {
+        const th = document.createElement("th");
+        th.textContent = c;
+        head.appendChild(th);
+      }
+      wrap.appendChild(head);
+      for (const row of result.rows) {
+        const tr = document.createElement("tr");
+        for (const v of row) {
+          const td = document.createElement("td");
+          if (v === null) {
+            td.textContent = "NULL";
+            td.className = "null";
+          } else {
+            td.textContent = String(v);
+          }
+          tr.appendChild(td);
+        }
+        wrap.appendChild(tr);
+      }
+      $("out").innerHTML = "";
+      $("out").appendChild(wrap);
+      $("meta").textContent = `${result.rowCount} row${result.rowCount === 1 ? "" : "s"}`;
+    }
+
+    function errorText(e) {
+      return e && e.message ? e.message : String(e);
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    }
+    function escapeAttr(s) {
+      return escapeHtml(s).replace(/"/g, "&quot;");
+    }
+
+    $("add-table").addEventListener("click", () => addTable());
+    $("run").addEventListener("click", () => {
+      try {
+        renderTable(JSON.parse(run(currentTables(), $("sql").value)));
+      } catch (e) {
+        showError(errorText(e));
+      }
+    });
+    $("explain").addEventListener("click", () => {
+      try {
+        $("out").innerHTML = "";
+        const pre = document.createElement("pre");
+        pre.textContent = explain_query(currentTables(), $("sql").value);
+        $("out").appendChild(pre);
+        $("meta").textContent = "plan (not executed)";
+      } catch (e) {
+        showError(errorText(e));
+      }
+    });
+    $("check").addEventListener("click", () => {
+      try {
+        check_query(currentTables(), $("sql").value);
+        $("out").innerHTML = "";
+        $("out").textContent = "OK: the query parses and matches the table columns.";
+        $("meta").textContent = "";
+      } catch (e) {
+        showError(errorText(e));
+      }
+    });
+    $("load-example").addEventListener("click", () => {
+      const ex = EXAMPLES[$("example").value];
+      setTables(ex.tables);
+      $("sql").value = ex.sql;
+    });
+
+    for (const name of Object.keys(EXAMPLES)) {
+      const opt = document.createElement("option");
+      opt.textContent = name;
+      $("example").appendChild(opt);
+    }
+
+    await init();
+    const first = Object.keys(EXAMPLES)[0];
+    setTables(EXAMPLES[first].tables);
+    $("sql").value = EXAMPLES[first].sql;
+    $("meta").textContent = `engine ${version()}`;
+  </script>
+</body>
+</html>

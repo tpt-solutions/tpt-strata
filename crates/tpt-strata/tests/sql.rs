@@ -226,7 +226,7 @@ fn select_global_aggregate() {
         .run("SELECT SUM(salary) AS total FROM employees")
         .unwrap();
     assert_eq!(out.row_count(), 1);
-    assert_eq!(out.column_names(), vec!["SUM(salary)".to_string()]);
+    assert_eq!(out.column_names(), vec!["total".to_string()]);
 }
 
 #[test]

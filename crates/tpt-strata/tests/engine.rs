@@ -234,7 +234,7 @@ fn join_equi_join_produces_concatenated_schema() {
 
     let left_plan: Arc<dyn PhysicalPlan> = Arc::new(DataSource::from_batch(left));
     let right_plan: Arc<dyn PhysicalPlan> = Arc::new(DataSource::from_batch(right));
-    let plan = JoinExec::new(left_plan, right_plan, 0, 0);
+    let plan = JoinExec::try_new(left_plan, right_plan, 0, 0).unwrap();
 
     assert_eq!(plan.schema().len(), 4);
 

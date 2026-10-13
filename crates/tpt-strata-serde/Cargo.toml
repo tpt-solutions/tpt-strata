@@ -1,0 +1,23 @@
+[package]
+name = "tpt-strata-serde"
+description = "Serde support for tpt-strata: convert flat structs to tables and back"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["serde", "columnar", "table", "sql", "tpt-strata"]
+categories = ["database", "encoding"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-strata-serde"
+# Not yet released. Remove this line when the crate is ready to publish.
+publish = false
+
+[dependencies]
+tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
+serde = { version = "1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

@@ -28,10 +28,21 @@ See `spec.txt` for the full design spec, including the non-negotiables:
 
 ## Crates
 
-| Crate | Purpose | External deps |
-|---|---|---|
-| `tpt-strata` | Core engine: native format, builder API, SQL surface, diagnostics | 0 |
-| `tpt-strata-parquet` | Parquet import bridge | Parquet/Arrow only |
+| Crate | Purpose | External deps | Docs |
+|---|---|---|---|
+| [`tpt-strata`](crates/tpt-strata) | Core engine: native format, builder API, SQL surface, diagnostics | 0 | [README](crates/tpt-strata/README.md), [CHANGELOG](crates/tpt-strata/CHANGELOG.md) |
+| [`tpt-strata-parquet`](crates/tpt-strata-parquet) | Parquet import and export bridge | Parquet/Arrow only | [README](crates/tpt-strata-parquet/README.md), [CHANGELOG](crates/tpt-strata-parquet/CHANGELOG.md) |
+| [`tpt-strata-cli`](crates/tpt-strata-cli) | `strata` command: SQL over CSV and Parquet files | the two crates above | not published |
+| [`tpt-strata-serde`](crates/tpt-strata-serde) | Serde: convert structs to tables and back | serde | not published |
+| [`tpt-strata-wasm`](crates/tpt-strata-wasm) | WebAssembly build, used by the [browser playground](playground/) | wasm-bindgen, serde_json | not published |
+| [`tpt-strata-python`](crates/tpt-strata-python) | Python bindings (`import tpt_strata`), built with maturin | PyO3 | not published |
+
+The serde and WASM crates build with the workspace. The Python binding needs
+maturin and a Python toolchain, so it sits outside the Rust workspace. The core
+crate stays dependency-free in every case. See [docs/bindings.md](docs/bindings.md).
+
+New here? Start with the [quickstart](docs/quickstart.md) and the
+[cookbook](docs/cookbook.md).
 
 ## Quick Start
 
@@ -65,15 +76,18 @@ let result = ctx.run(
 )?;
 ```
 
-Supported SQL: `SELECT` (columns, `*`, `SUM`/`COUNT`/`MIN`/`MAX`/`AVG`),
-`FROM`/`JOIN ... ON`, `WHERE` (with `AND`), `GROUP BY`, `ORDER BY`, `LIMIT`.
-Keywords are case-insensitive; column names are case-sensitive.
+Supported SQL: `SELECT` (columns, `*`, `SUM`/`COUNT`/`MIN`/`MAX`/`AVG`,
+`AS` aliases, `DISTINCT`), `FROM`/`JOIN ... ON`, `WHERE` with `AND`,
+`BETWEEN`, `IS [NOT] NULL` and `[NOT] LIKE`, `GROUP BY`, `HAVING`, `ORDER BY`
+(several keys, aliases allowed), `LIMIT`, `OFFSET`. Keywords are
+case-insensitive; column names are case-sensitive.
 
-Anything outside that subset — `OR`, `IS NULL`, `IN`, `BETWEEN`, `LIKE`,
-`DISTINCT`, `HAVING`, parentheses, `LEFT`/`OUTER` joins, multiple joins,
-column-to-column comparisons — is rejected with a targeted diagnostic naming
-the construct and pointing at [docs/v1.1-scope.md](docs/v1.1-scope.md): those
-omissions are deliberate decisions for the v1.1 milestone, not accidents.
+Anything outside that subset, such as `OR`, `IN`, parentheses, `LEFT`/`OUTER`
+joins, multiple joins, and column-to-column comparisons, is rejected with a
+targeted diagnostic naming the construct and pointing at
+[docs/v1.1-scope.md](docs/v1.1-scope.md). Those omissions are deliberate
+decisions for the v1.1 milestone, not accidents. The
+[FAQ](docs/faq.md) lists them all.
 
 ## Reading Parquet files
 
@@ -81,21 +95,43 @@ The import bridge reads Parquet into tpt-strata's native format with no
 core-crate dependency on Parquet/Arrow:
 
 ```rust
-use tpt_strata_parquet::read_parquet;
+use tpt_strata_parquet::{read_parquet, write_parquet};
 
 let table = read_parquet("metrics.parquet")?;
+write_parquet(&table, "copy.parquet")?;
 ```
 
-Supported columns: `BOOLEAN`, `INT32`, `INT64`, `DOUBLE`, `STRING`.
-Unsupported types are rejected with a diagnostic naming the offending column.
+Integers, floats, strings, booleans, dates and timestamps are read; narrow and
+unsigned integers and `FLOAT` are widened. Other types, such as binary,
+decimals and `UINT64`, are rejected with a diagnostic naming the column. Read
+only the columns you need with `read_parquet_columns`. See the
+[crate README](crates/tpt-strata-parquet/README.md) for the full mapping.
+
+CSV needs no extra crate: `tpt_strata::csv::parse_csv` and `to_csv`.
+
+## Command line
+
+The `strata` binary runs SQL over CSV and Parquet files. Each file becomes a
+table named after the file:
+
+```sh
+cargo run -p tpt-strata-cli -- crates/tpt-strata/examples/data/orders.csv \
+  "SELECT region, SUM(quantity) AS units FROM orders GROUP BY region ORDER BY units DESC"
+```
+
+Pass two files to join them, use `--explain` to print the plan, `--check` to
+validate a query against the schemas, or `--csv` for CSV output. Run it with
+no query for a prompt.
 
 ## Examples
 
-Runnable end-to-end examples for both crates:
+Runnable end-to-end examples:
 
 ```sh
 cargo run -p tpt-strata --example basic_query     # builder API end-to-end
 cargo run -p tpt-strata --example sql_query       # SqlContext end-to-end (incl. JOIN)
+cargo run -p tpt-strata --example csv_analytics   # CSV in, report out, plan printed
+cargo run -p tpt-strata --example joins_and_aliases   # joins, HAVING, paging, check()
 cargo run -p tpt-strata --example diagnostics     # every QueryError variant, printed
 cargo run -p tpt-strata-parquet --example read_parquet   # Parquet file -> table
 ```
@@ -117,6 +153,12 @@ Full numbers, per-workload benchmarks, and side-by-side diagnostic wording:
 
 ## Docs
 
+- [docs/quickstart.md](docs/quickstart.md) — from nothing to a query in five
+  minutes
+- [docs/cookbook.md](docs/cookbook.md) — recipes for filters, aggregation,
+  joins, paging, reading and writing files, and CI checks
+- [docs/faq.md](docs/faq.md) — what it is for, what it is not for, NULL and
+  number semantics, and what is not supported yet
 - [ARCHITECTURE.md](ARCHITECTURE.md) — crate boundaries, the format/engine
   split, and the bridge-isolation rule
 - [docs/v1.1-scope.md](docs/v1.1-scope.md) — deliberate v1.1 scope decisions

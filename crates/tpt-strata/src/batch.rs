@@ -3,6 +3,12 @@ use crate::error::QueryError;
 use crate::schema::Schema;
 use std::sync::Arc;
 
+/// A shared, cheaply clonable handle to a [`Batch`].
+///
+/// Operators pass batches down the plan and out of tables as `BatchRef`s, so
+/// reading a table into a query copies pointers rather than column data.
+pub type BatchRef = Arc<Batch>;
+
 /// A chunk of columnar data: a schema plus one array per field.
 ///
 /// Batches are the unit of streaming execution through the physical engine.

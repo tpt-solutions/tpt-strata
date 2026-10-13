@@ -1,0 +1,20 @@
+[package]
+name = "tpt-strata-cli"
+description = "Command-line SQL over Parquet and CSV files, powered by tpt-strata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+# Not yet released. Remove this line when the crate is ready to publish.
+publish = false
+
+[[bin]]
+name = "strata"
+path = "src/main.rs"
+
+[dependencies]
+tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
+tpt-strata-parquet = { version = "=1.0.1", path = "../tpt-strata-parquet" }

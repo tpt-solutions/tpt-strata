@@ -31,13 +31,66 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: Tests
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all --all-features
+
+  wasm:
+    name: WebAssembly build and Node smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: cargo install wasm-pack --version 0.15.0 --locked
+      - run: wasm-pack build crates/tpt-strata-wasm --target nodejs --out-dir ../../playground/pkg-node --release
+      - run: node playground/test/smoke.cjs
+
+  python:
+    name: Python wheel and tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/tpt-strata-python
+      - run: pip install maturin
+      - run: maturin build --release -m crates/tpt-strata-python/Cargo.toml -o dist
+      - run: pip install --force-reinstall dist/*.whl
+        shell: bash
+      - run: python -m unittest discover -s crates/tpt-strata-python/tests -v
+
+  docs:
+    name: Rustdoc (warnings are errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   build:
     name: Build

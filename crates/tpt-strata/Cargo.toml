@@ -8,9 +8,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
-readme = "../../README.md"
+keywords = ["columnar", "query-engine", "sql", "embeddable", "analytics"]
+categories = ["database", "data-structures", "parser-implementations"]
+readme = "README.md"
 documentation = "https://docs.rs/tpt-strata"
 
 [package.metadata.docs.rs]

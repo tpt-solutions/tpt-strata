@@ -215,7 +215,7 @@ fn observability_pipeline_ingest_to_dashboard() {
     // So just auth: 1 call, max 5.0.
     assert_eq!(
         out.column_names(),
-        vec!["region", "service", "COUNT(*)", "MAX(latency_ms)"]
+        vec!["region", "service", "calls", "p_max"]
     );
     let b = &out.batches()[0];
     assert_eq!(b.row_count(), 1);

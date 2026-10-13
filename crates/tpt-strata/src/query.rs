@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use crate::batch::Batch;
 use crate::engine::{
     AggFunc as EngAggFunc, Aggregate, AggregateExec, Comparison, DataSource, Expr, FilterExec,
     JoinExec, LimitExec, PhysicalPlan, Predicate, ProjectExec, SortExec, SortExpr,
 };
 use crate::error::QueryError;
 use crate::format::Table;
+use crate::schema::{DataType, Field};
 use crate::types::Scalar;
 
 /// Supported aggregate functions exposed by the builder.
@@ -53,6 +53,41 @@ fn to_engine_op(op: &str) -> Option<Comparison> {
     }
 }
 
+/// Coerce a literal to the type of the column it is compared against.
+///
+/// Integer and float literals may be compared with any numeric column, and
+/// the comparison is exact (see [`crate::types::numeric_cmp`]), so the literal
+/// keeps its own type. Other mismatched types are rejected.
+pub(crate) fn coerce_literal(
+    value: Scalar,
+    field: &Field,
+    column: &str,
+) -> Result<Scalar, QueryError> {
+    let numeric_column = matches!(
+        field.data_type,
+        DataType::Int32 | DataType::Int64 | DataType::Float64
+    );
+    let compatible = match &value {
+        Scalar::Null => true,
+        Scalar::I32(_) | Scalar::I64(_) | Scalar::F64(_) => numeric_column,
+        other => other.type_name() == field.data_type.name(),
+    };
+    if compatible {
+        Ok(value)
+    } else {
+        Err(QueryError::TypeMismatch {
+            column: column.to_string(),
+            expected: field.data_type.name(),
+            actual: value.type_name(),
+            context: format!(
+                "Cannot compare '{column}' ({}) with a literal of {} type",
+                field.data_type,
+                value.type_name()
+            ),
+        })
+    }
+}
+
 /// A builder for constructing and executing queries over a [`Table`].
 ///
 /// Zero trait implementations are required for the common case.
@@ -62,6 +97,7 @@ pub struct QueryBuilder<'a> {
     predicates: Vec<Predicate>,
     projections: Option<Vec<String>>,
     group_by: Vec<String>,
+    /// `(column, func)` pairs. The column `"*"` stands for `COUNT(*)`.
     aggregates: Vec<(String, AggFunc)>,
     order_by: Option<(String, bool)>,
     limit: Option<usize>,
@@ -83,15 +119,15 @@ impl<'a> QueryBuilder<'a> {
 
     /// Filter rows where `column` `op` `value`.
     ///
-    /// Supported ops: `=`, `!=`, `>`, `>=`, `<`, `<=`.
-    /// Type mismatch is checked eagerly at build time.
+    /// Supported ops: `=`, `!=`, `>`, `>=`, `<`, `<=`. Integer and float
+    /// values may be mixed with numeric columns; other type mismatches are
+    /// rejected at build time.
     pub fn filter(mut self, column: &str, op: &str, value: Scalar) -> Result<Self, QueryError> {
         let idx = self.table.column_index(column)?;
         let field = &self.table.schema().fields[idx];
 
-        // Type check at build time.
-        let field_type = field.data_type.name();
-        if !matches!(value, Scalar::Null) && value.type_name() != field_type {
+        if !matches!(value, Scalar::Null) && coerce_literal(value.clone(), field, column).is_err() {
+            let field_type = field.data_type.name();
             return Err(QueryError::TypeMismatch {
                 column: column.to_string(),
                 expected: field_type,
@@ -118,10 +154,12 @@ impl<'a> QueryBuilder<'a> {
     }
 
     /// Project only the specified columns.
+    ///
+    /// Names refer to the output of the query: input columns when there is no
+    /// aggregate, or group-by columns and aggregate names such as
+    /// `"SUM(salary)"` when there is one. Names are checked when the query
+    /// executes, because aggregate names only exist once aggregation is planned.
     pub fn project(mut self, columns: Vec<&str>) -> Result<Self, QueryError> {
-        for col in &columns {
-            self.table.column_index(col)?;
-        }
         self.projections = Some(columns.into_iter().map(String::from).collect());
         Ok(self)
     }
@@ -142,7 +180,16 @@ impl<'a> QueryBuilder<'a> {
         Ok(self)
     }
 
+    /// Add `COUNT(*)`, which counts every row including rows with nulls.
+    pub fn count_all(mut self) -> Self {
+        self.aggregates.push(("*".to_string(), AggFunc::Count));
+        self
+    }
+
     /// Order results by the specified column (ascending unless `desc`).
+    ///
+    /// The column is checked against the query's output when the query is
+    /// executed, since aggregate names only exist once aggregation is planned.
     pub fn order_by(mut self, column: &str, desc: bool) -> Result<Self, QueryError> {
         self.order_by = Some((column.to_string(), desc));
         Ok(self)
@@ -157,9 +204,10 @@ impl<'a> QueryBuilder<'a> {
     /// Execute the query and return the result table.
     pub fn execute(self) -> Result<Table, QueryError> {
         let input_schema = Arc::new(self.table.schema().clone());
-
-        let mut plan: Arc<dyn PhysicalPlan> =
-            Arc::new(DataSource::new(input_schema, self.table.batches().to_vec()));
+        let mut plan: Arc<dyn PhysicalPlan> = Arc::new(DataSource::from_shared(
+            input_schema,
+            self.table.batches().to_vec(),
+        ));
 
         for predicate in self.predicates {
             plan = Arc::new(FilterExec::new(plan, predicate));
@@ -175,6 +223,14 @@ impl<'a> QueryBuilder<'a> {
                 .aggregates
                 .iter()
                 .map(|(col, func)| {
+                    if col == "*" {
+                        return Ok(Aggregate {
+                            func: to_engine_func(*func),
+                            column: 0,
+                            out_name: format!("{func}(*)"),
+                            count_star: true,
+                        });
+                    }
                     self.table.column_index(col).map(|idx| Aggregate {
                         func: to_engine_func(*func),
                         column: idx,
@@ -184,17 +240,25 @@ impl<'a> QueryBuilder<'a> {
                 })
                 .collect::<Result<_, _>>()?;
             plan = Arc::new(AggregateExec::new(plan, group_indices, aggregates)?);
-        } else if let Some(projections) = self.projections.as_ref() {
+        }
+
+        // Projection applies to the query output: the input columns when there
+        // is no aggregation, otherwise the group-by and aggregate columns.
+        if let Some(projections) = self.projections.as_ref() {
+            let schema = plan.schema();
             let exprs: Vec<Expr> = projections
                 .iter()
                 .map(|name| {
-                    self.table
-                        .column_index(name)
+                    schema
+                        .index_of(name)
                         .map(|idx| Expr { column: idx })
+                        .ok_or_else(|| QueryError::MissingColumn {
+                            column: name.clone(),
+                            available: schema.fields.iter().map(|f| f.name.clone()).collect(),
+                        })
                 })
                 .collect::<Result<_, _>>()?;
-            let out_names = projections.clone();
-            plan = Arc::new(ProjectExec::new(plan, exprs, out_names)?);
+            plan = Arc::new(ProjectExec::new(plan, exprs, projections.clone())?);
         }
 
         if let Some((col, desc)) = self.order_by.as_ref() {
@@ -220,15 +284,19 @@ impl<'a> QueryBuilder<'a> {
             plan = Arc::new(LimitExec::new(plan, n));
         }
 
-        let batches: Vec<Batch> = plan.execute()?;
-        Ok(Table::from_batches(
+        let batches = plan.execute()?;
+        Ok(Table::from_shared_batches(
             Arc::new(plan.schema().clone()),
             batches,
         ))
     }
 }
 
-/// Build and execute an equi-join between two tables.
+/// Build and execute an inner equi-join between two tables.
+///
+/// The two tables must not share a column name, because the output must have
+/// unambiguous column names. Rename one side first (see
+/// [`Table::rename_columns`]).
 pub fn join(
     left: &Table,
     right: &Table,
@@ -238,18 +306,18 @@ pub fn join(
     let left_idx = left.column_index(left_column)?;
     let right_idx = right.column_index(right_column)?;
 
-    let left_plan: Arc<dyn PhysicalPlan> = Arc::new(DataSource::new(
+    let left_plan: Arc<dyn PhysicalPlan> = Arc::new(DataSource::from_shared(
         Arc::new(left.schema().clone()),
         left.batches().to_vec(),
     ));
-    let right_plan: Arc<dyn PhysicalPlan> = Arc::new(DataSource::new(
+    let right_plan: Arc<dyn PhysicalPlan> = Arc::new(DataSource::from_shared(
         Arc::new(right.schema().clone()),
         right.batches().to_vec(),
     ));
 
-    let plan = JoinExec::new(left_plan, right_plan, left_idx, right_idx);
+    let plan = JoinExec::try_new(left_plan, right_plan, left_idx, right_idx)?;
     let batches = plan.execute()?;
-    Ok(Table::from_batches(
+    Ok(Table::from_shared_batches(
         Arc::new(plan.schema().clone()),
         batches,
     ))
