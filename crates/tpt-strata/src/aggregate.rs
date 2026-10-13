@@ -176,7 +176,7 @@ impl AggState {
     /// Fold one batch into the state. `gids[row]` is the group of each row of
     /// batch `bi`. The column type is matched once per batch, and each loop is
     /// typed, so there is no per-row dispatch on state or column.
-    fn update_batch(&mut self, batches: &[BatchRef], bi: usize, gids: &[usize]) {
+    fn update_batch(&mut self, batches: &[BatchRef], bi: usize, start: usize, gids: &[usize]) {
         let batch = &batches[bi];
         match self {
             AggState::Sum {
@@ -187,7 +187,8 @@ impl AggState {
                 ..
             } => match &*batch.columns[*col] {
                 ArrayRef::Int32(a) => {
-                    for (row, &gid) in gids.iter().enumerate() {
+                    for (k, &gid) in gids.iter().enumerate() {
+                        let row = start + k;
                         if let Some(v) = a.0[row] {
                             int[gid] += i128::from(v);
                             float[gid] += f64::from(v);
@@ -196,7 +197,8 @@ impl AggState {
                     }
                 }
                 ArrayRef::Int64(a) => {
-                    for (row, &gid) in gids.iter().enumerate() {
+                    for (k, &gid) in gids.iter().enumerate() {
+                        let row = start + k;
                         if let Some(v) = a.0[row] {
                             int[gid] += i128::from(v);
                             float[gid] += v as f64;
@@ -205,7 +207,8 @@ impl AggState {
                     }
                 }
                 ArrayRef::Float64(a) => {
-                    for (row, &gid) in gids.iter().enumerate() {
+                    for (k, &gid) in gids.iter().enumerate() {
+                        let row = start + k;
                         if let Some(v) = a.0[row] {
                             float[gid] += v;
                             saw[gid] = true;
@@ -216,7 +219,8 @@ impl AggState {
             },
             AggState::Count { col, count_star, n } => {
                 let column = &batch.columns[*col];
-                for (row, &gid) in gids.iter().enumerate() {
+                for (k, &gid) in gids.iter().enumerate() {
+                    let row = start + k;
                     if *count_star || !column.is_null(row) {
                         n[gid] += 1;
                     }
@@ -224,7 +228,8 @@ impl AggState {
             }
             AggState::MinMax { col, max, best } => {
                 let value = &batch.columns[*col];
-                for (row, &gid) in gids.iter().enumerate() {
+                for (k, &gid) in gids.iter().enumerate() {
+                    let row = start + k;
                     if value.is_null(row) {
                         continue;
                     }
@@ -248,7 +253,8 @@ impl AggState {
             }
             AggState::Avg { col, int, float, n } => match &*batch.columns[*col] {
                 ArrayRef::Int32(a) => {
-                    for (row, &gid) in gids.iter().enumerate() {
+                    for (k, &gid) in gids.iter().enumerate() {
+                        let row = start + k;
                         if let Some(v) = a.0[row] {
                             int[gid] += i128::from(v);
                             n[gid] += 1;
@@ -256,7 +262,8 @@ impl AggState {
                     }
                 }
                 ArrayRef::Int64(a) => {
-                    for (row, &gid) in gids.iter().enumerate() {
+                    for (k, &gid) in gids.iter().enumerate() {
+                        let row = start + k;
                         if let Some(v) = a.0[row] {
                             int[gid] += i128::from(v);
                             n[gid] += 1;
@@ -264,7 +271,8 @@ impl AggState {
                     }
                 }
                 ArrayRef::Float64(a) => {
-                    for (row, &gid) in gids.iter().enumerate() {
+                    for (k, &gid) in gids.iter().enumerate() {
+                        let row = start + k;
                         if let Some(v) = a.0[row] {
                             float[gid] += v;
                             n[gid] += 1;
@@ -273,6 +281,81 @@ impl AggState {
                 }
                 _ => {}
             },
+        }
+    }
+
+    /// Fold another partial state into this one. `map[g]` is the group in
+    /// `self` for group `g` of `other`. Min and max keep the earlier value on
+    /// a tie, as a sequential pass does.
+    fn merge(&mut self, other: &AggState, map: &[usize], batches: &[BatchRef]) {
+        match (self, other) {
+            (
+                AggState::Sum {
+                    int, float, saw, ..
+                },
+                AggState::Sum {
+                    int: oi,
+                    float: of,
+                    saw: os,
+                    ..
+                },
+            ) => {
+                for (lg, &gg) in map.iter().enumerate() {
+                    int[gg] += oi[lg];
+                    float[gg] += of[lg];
+                    saw[gg] |= os[lg];
+                }
+            }
+            (AggState::Count { n, .. }, AggState::Count { n: on, .. }) => {
+                for (lg, &gg) in map.iter().enumerate() {
+                    n[gg] += on[lg];
+                }
+            }
+            (
+                AggState::MinMax { col, max, best },
+                AggState::MinMax {
+                    best: other_best, ..
+                },
+            ) => {
+                for (lg, &gg) in map.iter().enumerate() {
+                    let Some((pb, pr)) = other_best[lg] else {
+                        continue;
+                    };
+                    let replace = match best[gg] {
+                        None => true,
+                        Some((cb, cr)) => {
+                            let current = key_at(&batches[cb].columns[*col], cr);
+                            let candidate = key_at(&batches[pb].columns[*col], pr);
+                            let ord = candidate.cmp(&current);
+                            if *max {
+                                ord == std::cmp::Ordering::Greater
+                            } else {
+                                ord == std::cmp::Ordering::Less
+                            }
+                        }
+                    };
+                    if replace {
+                        best[gg] = Some((pb, pr));
+                    }
+                }
+            }
+            (
+                AggState::Avg { int, float, n, .. },
+                AggState::Avg {
+                    int: oi,
+                    float: of,
+                    n: on,
+                    ..
+                },
+            ) => {
+                for (lg, &gg) in map.iter().enumerate() {
+                    int[gg] += oi[lg];
+                    float[gg] += of[lg];
+                    n[gg] += on[lg];
+                }
+            }
+            // Partials come from the same aggregates, so the kinds match.
+            _ => unreachable!("partial states come from the same aggregates"),
         }
     }
 
@@ -394,18 +477,39 @@ impl AggregateExec {
     }
 }
 
-impl PhysicalPlan for AggregateExec {
-    fn schema(&self) -> &Schema {
-        &self.schema
+/// Rows per unit of aggregation work. Segments are the unit that threads
+/// share, so a large batch splits across them.
+const SEGMENT_ROWS: usize = 64 * 1024;
+
+/// `(batch, start, end)`: rows `start..end` of batch `batch`, in input order.
+type Segment = (usize, usize, usize);
+
+fn segments(batches: &[BatchRef]) -> Vec<Segment> {
+    let mut segs = Vec::new();
+    for (bi, batch) in batches.iter().enumerate() {
+        let rows = batch.row_count();
+        let mut start = 0;
+        while start < rows {
+            let end = (start + SEGMENT_ROWS).min(rows);
+            segs.push((bi, start, end));
+            start = end;
+        }
     }
+    segs
+}
 
-    fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
-        let batches = self.input.execute()?;
+/// Groups in first-seen order, with one state per aggregate, for some
+/// segments. Partials over contiguous segments merge, in order, into the same
+/// result as one sequential pass.
+struct Partial {
+    first: Vec<Option<(usize, usize)>>,
+    states: Vec<AggState>,
+}
+
+impl AggregateExec {
+    fn new_states(&self) -> Vec<AggState> {
         let input = self.input.schema();
-        let global = self.group_by.is_empty();
-
-        let mut states: Vec<AggState> = self
-            .aggregates
+        self.aggregates
             .iter()
             .map(|a| {
                 let dt = input
@@ -413,13 +517,20 @@ impl PhysicalPlan for AggregateExec {
                     .map_or(DataType::Float64, |f| f.data_type);
                 AggState::new(a, dt)
             })
-            .collect();
+            .collect()
+    }
 
+    /// Aggregate the given segments on the calling thread.
+    fn run_segments(&self, batches: &[BatchRef], segs: &[Segment]) -> Partial {
+        let global = self.group_by.is_empty();
+        let mut states = self.new_states();
         // Representative row of each group, in first-seen order. A global
         // aggregate has one group, which has no representative row when the
         // input is empty.
         let mut first: Vec<Option<(usize, usize)>> = Vec::new();
         let mut index: FastMap<Vec<KeyPart<'_>>, usize> = FastMap::default();
+        // With one group column, index on the key itself: no per-row Vec.
+        let mut single_index: FastMap<KeyPart<'_>, usize> = FastMap::default();
         if global {
             first.push(None);
             for s in &mut states {
@@ -428,13 +539,11 @@ impl PhysicalPlan for AggregateExec {
         }
 
         let mut scratch: Vec<KeyPart<'_>> = Vec::with_capacity(self.group_by.len());
-        // With one group column, index on the key itself: no per-row Vec.
-        let mut single_index: FastMap<KeyPart<'_>, usize> = FastMap::default();
-        // Group ids for one batch at a time; each aggregate then folds the whole batch.
         let mut gids: Vec<usize> = Vec::new();
-        for (bi, batch) in batches.iter().enumerate() {
+        for &(bi, start, end) in segs {
+            let batch = &batches[bi];
             gids.clear();
-            for row in 0..batch.row_count() {
+            for row in start..end {
                 let gid = if global {
                     0
                 } else if let [c] = self.group_by.as_slice() {
@@ -474,9 +583,103 @@ impl PhysicalPlan for AggregateExec {
                 gids.push(gid);
             }
             for s in &mut states {
-                s.update_batch(&batches, bi, &gids);
+                s.update_batch(batches, bi, start, &gids);
             }
         }
+        Partial { first, states }
+    }
+
+    /// Run the segments: on one thread, or split across threads when the
+    /// `parallel` feature is on. Partials come back in segment order.
+    fn run_partials(&self, batches: &[BatchRef], segs: &[Segment]) -> Vec<Partial> {
+        #[cfg(feature = "parallel")]
+        {
+            let threads = std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(segs.len());
+            if threads > 1 {
+                let per = segs.len().div_ceil(threads);
+                return std::thread::scope(|scope| {
+                    let workers: Vec<_> = segs
+                        .chunks(per)
+                        .map(|chunk| scope.spawn(move || self.run_segments(batches, chunk)))
+                        .collect();
+                    workers
+                        .into_iter()
+                        .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                        .collect()
+                });
+            }
+        }
+        vec![self.run_segments(batches, segs)]
+    }
+
+    /// Merge partials, in order, into one set of groups and states. A group
+    /// keeps the position where the sequential pass first saw it.
+    fn merge_partials(
+        &self,
+        batches: &[BatchRef],
+        partials: Vec<Partial>,
+    ) -> (Vec<Option<(usize, usize)>>, Vec<AggState>) {
+        let global = self.group_by.is_empty();
+        let mut states = self.new_states();
+        let mut first: Vec<Option<(usize, usize)>> = Vec::new();
+        let mut index: FastMap<Vec<KeyPart<'_>>, usize> = FastMap::default();
+        if global {
+            first.push(None);
+            index.insert(Vec::new(), 0);
+            for s in &mut states {
+                s.push_group();
+            }
+        }
+        for partial in &partials {
+            let mut map = Vec::with_capacity(partial.first.len());
+            for rep in &partial.first {
+                let key: Vec<KeyPart<'_>> = match rep {
+                    Some((bi, row)) => self
+                        .group_by
+                        .iter()
+                        .map(|&c| key_at(&batches[*bi].columns[c], *row))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let gid = match index.get(&key) {
+                    Some(&g) => g,
+                    None => {
+                        let g = first.len();
+                        first.push(*rep);
+                        index.insert(key, g);
+                        for s in &mut states {
+                            s.push_group();
+                        }
+                        g
+                    }
+                };
+                map.push(gid);
+            }
+            for (state, other) in states.iter_mut().zip(&partial.states) {
+                state.merge(other, &map, batches);
+            }
+        }
+        (first, states)
+    }
+}
+
+impl PhysicalPlan for AggregateExec {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
+        let batches = self.input.execute()?;
+        let segs = segments(&batches);
+        let mut partials = self.run_partials(&batches, &segs);
+        let (first, states) = if partials.len() == 1 {
+            let only = partials.remove(0);
+            (only.first, only.states)
+        } else {
+            self.merge_partials(&batches, partials)
+        };
 
         let groups = first.len();
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.len());

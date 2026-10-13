@@ -315,6 +315,104 @@ fn duck_query(conn: &Connection, sql: &str) -> Result<Vec<Vec<Cell>>, String> {
     Ok(out)
 }
 
+// === Ceiling: hardware bound and hand-written floor ===
+
+/// Single-thread read rate in GB/s: a sum over a buffer far larger than cache,
+/// best of `RUNS`. This is the speed a scan can reach if nothing else is slow.
+fn measure_bandwidth() -> f64 {
+    const WORDS: usize = 32 * 1024 * 1024; // 256 MB of u64
+    let buf: Vec<u64> = (0..WORDS as u64).collect();
+    let bytes = (WORDS * std::mem::size_of::<u64>()) as f64;
+    let mut best = f64::MAX;
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        let s = std::hint::black_box(buf.iter().fold(0u64, |a, &x| a.wrapping_add(x)));
+        std::hint::black_box(s);
+        best = best.min(t.elapsed().as_secs_f64());
+    }
+    bytes / best / 1e9
+}
+
+/// Region names as small codes, so the floor loops index an array. Built once,
+/// outside the timed runs.
+fn region_codes(d: &Data) -> Vec<u8> {
+    d.region
+        .iter()
+        .map(|r| REGIONS.iter().position(|x| *x == r.as_str()).unwrap() as u8)
+        .collect()
+}
+
+/// Q1 as one pass over typed columns, with an array of accumulators per region.
+fn q1_floor(d: &Data, codes: &[u8]) -> Vec<Vec<Cell>> {
+    let mut units = [0i64; 8];
+    let mut price_sum = [0f64; 8];
+    let mut n = [0i64; 8];
+    for ((&c, &q), &p) in codes.iter().zip(&d.quantity).zip(&d.price) {
+        let c = c as usize;
+        units[c] += q;
+        price_sum[c] += p;
+        n[c] += 1;
+    }
+    let mut order: Vec<usize> = (0..8).collect();
+    order.sort_by_key(|&c| REGIONS[c]);
+    order
+        .iter()
+        .map(|&c| {
+            vec![
+                Cell::Text(REGIONS[c].to_string()),
+                Cell::Int(units[c]),
+                Cell::Float(price_sum[c] / n[c] as f64),
+                Cell::Int(n[c]),
+            ]
+        })
+        .collect()
+}
+
+/// Q2 as one filter pass, then a top-100 selection over the survivors only.
+/// Ties on price keep input order, as the SQL engines do.
+fn q2_floor(d: &Data, codes: &[u8]) -> Vec<Vec<Cell>> {
+    let mut hits: Vec<(f64, u32)> = Vec::new();
+    for (i, (&q, &p)) in d.quantity.iter().zip(&d.price).enumerate() {
+        if q > 50 && p < 40.0 {
+            hits.push((p, i as u32));
+        }
+    }
+    let cmp = |a: &(f64, u32), b: &(f64, u32)| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1));
+    if hits.len() > 100 {
+        hits.select_nth_unstable_by(99, cmp);
+        hits.truncate(100);
+    }
+    hits.sort_by(cmp);
+    hits.iter()
+        .map(|&(p, i)| {
+            let i = i as usize;
+            vec![
+                Cell::Int(d.id[i]),
+                Cell::Text(REGIONS[codes[i] as usize].to_string()),
+                Cell::Float(p),
+            ]
+        })
+        .collect()
+}
+
+/// Q3 as a direct lookup from dim_id to label (dims ids are 0..1000 and the
+/// label of id i is i % 20, as in `dims_table`), then 20 sum accumulators.
+fn q3_floor(d: &Data) -> Vec<Vec<Cell>> {
+    let label_of: Vec<usize> = (0..1000).map(|i| i % 20).collect();
+    let mut units = [0i64; 20];
+    for (&dim, &q) in d.dim_id.iter().zip(&d.quantity) {
+        units[label_of[dim as usize]] += q;
+    }
+    (0..20)
+        .map(|c| {
+            vec![
+                Cell::Text(format!("label-{:02}", c)),
+                Cell::Int(units[c]),
+            ]
+        })
+        .collect()
+}
+
 // === Driver ===
 
 struct Measured {
@@ -355,7 +453,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = generate(rows);
     tpt_strata_parquet::write_parquet(&facts_table(&data), &facts_path)?;
     tpt_strata_parquet::write_parquet(&dims_table(), &dims_path)?;
-    drop(data);
 
     // --- load: read the Parquet files into each engine's own format ---
     let t = Instant::now();
@@ -391,6 +488,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.add_table("facts", &t_facts);
     ctx.add_table("dims", &t_dims);
 
+    let bw = measure_bandwidth();
+    let codes = region_codes(&data);
+    // Ideal bytes read per row: Q1 region code + quantity + price (17);
+    // Q2 scan reads quantity + price (16); Q3 reads dim_id + quantity (16).
+    let bound_ms = |name: &str| -> f64 {
+        let bytes_per_row = if name.starts_with("Q1") { 17.0 } else { 16.0 };
+        rows as f64 * bytes_per_row / (bw * 1e9) * 1e3
+    };
+
     let mut results: Vec<Measured> = Vec::new();
     let queries: [(&'static str, &str); 3] = [
         ("Q1 group by + 3 aggregates", Q1_TPT),
@@ -410,6 +516,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             median_ms: tpt_ms,
             summary: summarize(&tpt_rows),
             matches_reference: true,
+        });
+
+        let (floor_ms, floor_cells) = match name {
+            n if n.starts_with("Q1") => bench_sync(|| Ok(q1_floor(&data, &codes)))?,
+            n if n.starts_with("Q2") => bench_sync(|| Ok(q2_floor(&data, &codes)))?,
+            _ => bench_sync(|| Ok(q3_floor(&data)))?,
+        };
+        let s = summarize(&floor_cells);
+        results.push(Measured {
+            query: name,
+            engine: "hand-written loop (1 thread)".into(),
+            median_ms: floor_ms,
+            matches_reference: same(&s, &reference),
+            summary: s,
         });
 
 
@@ -479,6 +599,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for m in mismatches {
             eprintln!("  {} / {}: {:?}", m.query, m.engine, m.summary);
         }
+    }
+    println!("\n## Ceiling and distance (1 thread)");
+    println!("- single-thread read rate: {bw:.1} GB/s (sum over 256 MB, best of {RUNS})");
+    println!("- bandwidth bound = rows × ideal bytes per row ÷ read rate");
+    println!("- ×floor = engine time ÷ hand-written loop time; % of bound = bound ÷ engine time");
+    println!("| query | bandwidth bound ms | hand loop ms | tpt-strata ×floor | DataFusion ×floor | DuckDB ×floor | tpt-strata % of bound |");
+    println!("|---|---|---|---|---|---|---|");
+    for (name, _) in queries {
+        let get = |engine: &str| -> f64 {
+            results
+                .iter()
+                .find(|m| m.query == name && m.engine == engine)
+                .map_or(f64::NAN, |m| m.median_ms)
+        };
+        let floor = get("hand-written loop (1 thread)");
+        let tpt = get("tpt-strata (1 thread)");
+        let df = get("DataFusion (1 partition)");
+        let duck = get("DuckDB (1 thread)");
+        let bound = bound_ms(name);
+        if floor < bound {
+            eprintln!("WARNING: {name}: hand loop ({floor:.2} ms) is faster than the bandwidth bound ({bound:.2} ms); check the byte count");
+        }
+        println!(
+            "| {name} | {} | {} | {:.1}× | {:.1}× | {:.1}× | {:.0}% |",
+            fmt_ms(bound),
+            fmt_ms(floor),
+            tpt / floor,
+            df / floor,
+            duck / floor,
+            bound / tpt * 100.0
+        );
     }
     Ok(())
 }

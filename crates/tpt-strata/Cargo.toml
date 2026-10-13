@@ -17,6 +17,11 @@ documentation = "https://docs.rs/tpt-strata"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+# Split aggregation across threads, with std only. Off by default, so the
+# default build is single-threaded and zero-dependency.
+parallel = []
+
 [dependencies]
 # Zero external dependencies — this is a non-negotiable.
 

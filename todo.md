@@ -619,3 +619,8 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
 - [ ] Parity is not reached. Remaining gaps: join, per-row aggregate dispatch,
       `Vec<Option<T>>` array layout, and single-threaded execution.
 - [ ] Profiler re-run (12f) is still blocked on elevation.
+- [x] Ceiling and distance: `bench/compare` now runs a hand-written loop floor
+      and a bandwidth bound beside the engines (results in
+      docs/benchmark-comparison.md). tpt-strata is 28× (Q1), 3.5× (Q2) and 75×
+      (Q3) the hand loop. Next: a branchless or vectorised Q2 filter, and a
+      join probe that does not copy row positions.

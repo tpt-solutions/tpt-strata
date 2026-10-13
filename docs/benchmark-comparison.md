@@ -182,3 +182,58 @@ compare the tpt-strata figures across runs, not against DataFusion's.
 Joins now write one packed 8-byte position per row, not a 24-byte `Option`.
 Q3 went from 59 to 53 ms, and load from 146 to 97 ms, mostly from sharing one
 `Arc` per distinct Parquet string.
+
+## Ceiling and distance (hand-written floor, bandwidth bound)
+
+Run with the same data and method (1,000,000 rows, median of 5 after one
+warm-up, 2026-10-14). Added to `bench/compare`:
+
+- **Hand-written loop (floor):** one thread, plain typed `Vec`s, region as a
+  one-byte code, direct lookup for the join. It is the fastest a loop on these
+  columns is likely to get. It is not a true ceiling: DataFusion beats it on Q2.
+- **Bandwidth bound:** rows × ideal bytes per row ÷ single-thread read rate.
+  Q1 reads 17 bytes per row, Q2 and Q3 read 16.
+
+| query | bound ms | hand loop ms | tpt-strata ÷ loop | DataFusion ÷ loop | DuckDB ÷ loop | tpt-strata % of bound |
+|---|---|---|---|---|---|---|
+| Q1 group by + 3 aggregates | 1.15 | 1.12 | 28× | 8× | 20× | 4% |
+| Q2 filter + sort + limit | 1.08 | 4.16 | 3.5× | 0.9× | 3.3× | 7% |
+| Q3 join + group by | 1.08 | 0.72 | 75× | 14× | 8× | 2% |
+
+Read-rate probe: 14.8 GB/s single-thread (sum over 256 MB, best of 5).
+
+What this says:
+
+- **The distance is large.** tpt-strata runs at 2–7% of the bound on all
+  three queries. The gap is in the engine, not in memory bandwidth. Q1 and Q3
+  are 28× and 75× the hand loop.
+- **The bound is not a hard ceiling.** Q3 and Q1 hand loops ran faster than
+  the bound, so the probe is pessimistic. It is one sum loop, which may be
+  limited by the CPU rather than DRAM, and Q3's 16 MB of data partly fits in
+  cache. The warnings in the run flag this. Treat the bound as a rough guide.
+- **The floor is not the maximum.** On Q2, DataFusion (3.9 ms) beats the
+  hand loop (4.2 ms). Its filter must be branchless or vectorised. The real
+  ceiling is at most DataFusion's time on each query.
+- **Maximum reachable, practically:** the Q1 and Q3 hand loops suggest well
+  under 10 ms each for tpt-strata on one thread. Q2 is around 4 ms on a plain
+  loop. Those are the targets, not promises.
+
+Stop rule for this work: within about 20% of the best engine on a query, at
+or near the bound on scan-bound queries, and a flat profile.
+
+### Phase 15, parallel aggregation (opt-in `parallel` feature)
+
+The default build is still single-threaded. With `--features parallel` in
+tpt-strata, aggregation splits its input into 64k-row segments and folds
+contiguous runs of them on `std::thread::scope` workers, then merges the
+partials in order. Only aggregation runs in parallel; sort, join and
+filter still run on one thread.
+
+| query | tpt-strata, default (1 thread) | tpt-strata, `parallel` | DataFusion (all cores) |
+|---|---|---|---|
+| Q1 group by + 3 aggregates | 27.3 ms | 5.46 ms | 4.06 ms |
+| Q2 filter + sort + limit | 14.8 ms | 15.3 ms (no parallel stage) | 2.40 ms |
+| Q3 join + group by | 52.6 ms | 42.6 ms | 4.32 ms |
+
+Integer results are exact in both modes. Float `SUM` and `AVG` can differ in
+the last bit between the modes, because the addition order changes.
