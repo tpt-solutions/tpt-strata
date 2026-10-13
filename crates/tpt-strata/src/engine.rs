@@ -115,6 +115,8 @@ where
         DataType::Int64 => take_typed!(Int64, I64Array),
         DataType::Float64 => take_typed!(Float64, F64Array),
         DataType::Utf8 => take_typed!(Utf8, StrArray),
+        DataType::Date => take_typed!(Date, I32Array),
+        DataType::Timestamp => take_typed!(Timestamp, I64Array),
     }
 }
 
@@ -253,6 +255,8 @@ fn compare_values(a: &Scalar, b: &Scalar, op: Comparison) -> bool {
     let ord = numeric_cmp(a, b).or_else(|| match (a, b) {
         (Scalar::Str(x), Scalar::Str(y)) => Some(x.cmp(y)),
         (Scalar::Bool(x), Scalar::Bool(y)) => Some(x.cmp(y)),
+        (Scalar::Date(x), Scalar::Date(y)) => Some(x.cmp(y)),
+        (Scalar::Timestamp(x), Scalar::Timestamp(y)) => Some(x.cmp(y)),
         _ => None,
     });
     match op {
@@ -290,7 +294,17 @@ fn literal_key(v: &Scalar) -> Option<KeyPart<'_>> {
         Scalar::I32(n) => Some(KeyPart::I32(*n)),
         Scalar::I64(n) => Some(KeyPart::I64(*n)),
         Scalar::Str(s) => Some(KeyPart::Str(s)),
+        Scalar::Date(n) => Some(KeyPart::I32(*n)),
+        Scalar::Timestamp(n) => Some(KeyPart::I64(*n)),
         Scalar::F64(_) | Scalar::Null => None,
+    }
+}
+
+/// The rows in `rows` (or every row below `n`) for which `keep` holds, in order.
+fn for_rows(n: usize, rows: Option<&[usize]>, mut keep: impl FnMut(usize) -> bool) -> Vec<usize> {
+    match rows {
+        None => (0..n).filter(|&row| keep(row)).collect(),
+        Some(rows) => rows.iter().copied().filter(|&row| keep(row)).collect(),
     }
 }
 
@@ -301,35 +315,76 @@ impl Predicate {
     /// typed keys with no per-row `Scalar`. Otherwise each row goes through
     /// [`Predicate::matches`], which has the full SQL rules.
     pub fn select(&self, batch: &Batch) -> Vec<usize> {
+        self.select_from(batch, None)
+    }
+
+    /// As [`Predicate::select`], over only the candidate rows `rows`, in order.
+    /// `None` means every row. This lets a chain of predicates narrow one
+    /// selection without copying the batch between them.
+    pub fn select_from(&self, batch: &Batch, rows: Option<&[usize]>) -> Vec<usize> {
+        let column = batch.columns.get(self.column);
+
+        // A Float64 column against a Float64 literal compares the values
+        // directly. IEEE ordering already makes NaN unordered (false), and
+        // `!=` is made to agree with `compare_values`, which is also false.
+        let float_column = match column.map(|c| &**c) {
+            Some(ArrayRef::Float64(arr)) => Some(arr),
+            _ => None,
+        };
+        if let (Some(arr), Scalar::F64(lit)) = (float_column, &self.value) {
+            let op = self.op;
+            if matches!(
+                op,
+                Comparison::Eq
+                    | Comparison::NotEq
+                    | Comparison::Gt
+                    | Comparison::Gte
+                    | Comparison::Lt
+                    | Comparison::Lte
+            ) {
+                let lit = *lit;
+                return for_rows(batch.row_count(), rows, |row| {
+                    match arr.0.get(row).copied().flatten() {
+                        Some(x) if !x.is_nan() && !lit.is_nan() => match op {
+                            Comparison::Eq => x == lit,
+                            Comparison::NotEq => x != lit,
+                            Comparison::Gt => x > lit,
+                            Comparison::Gte => x >= lit,
+                            Comparison::Lt => x < lit,
+                            _ => x <= lit,
+                        },
+                        _ => false,
+                    }
+                });
+            }
+        }
+
         let typed = match self.op {
             Comparison::IsNull | Comparison::IsNotNull | Comparison::Like | Comparison::NotLike => {
                 None
             }
             _ => literal_key(&self.value),
         };
-        let column = batch.columns.get(self.column);
-        (0..batch.row_count())
-            .filter(|&row| {
-                if let (Some(lit), Some(col)) = (typed, column) {
-                    let key = key_at(col, row);
-                    // Same discriminant means same column type. A NULL key never
-                    // matches, which the fallback path also returns.
-                    if std::mem::discriminant(&key) == std::mem::discriminant(&lit) {
-                        let ord = key.cmp(&lit);
-                        return match self.op {
-                            Comparison::Eq => ord == Ordering::Equal,
-                            Comparison::NotEq => ord != Ordering::Equal,
-                            Comparison::Gt => ord == Ordering::Greater,
-                            Comparison::Gte => ord != Ordering::Less,
-                            Comparison::Lt => ord == Ordering::Less,
-                            Comparison::Lte => ord != Ordering::Greater,
-                            _ => self.matches(batch, row),
-                        };
-                    }
+        for_rows(batch.row_count(), rows, |row| {
+            if let (Some(lit), Some(col)) = (typed, column) {
+                let key = key_at(col, row);
+                // Same discriminant means same column type. A NULL key never
+                // matches, which the fallback path also returns.
+                if std::mem::discriminant(&key) == std::mem::discriminant(&lit) {
+                    let ord = key.cmp(&lit);
+                    return match self.op {
+                        Comparison::Eq => ord == Ordering::Equal,
+                        Comparison::NotEq => ord != Ordering::Equal,
+                        Comparison::Gt => ord == Ordering::Greater,
+                        Comparison::Gte => ord != Ordering::Less,
+                        Comparison::Lt => ord == Ordering::Less,
+                        Comparison::Lte => ord != Ordering::Greater,
+                        _ => self.matches(batch, row),
+                    };
                 }
-                self.matches(batch, row)
-            })
-            .collect()
+            }
+            self.matches(batch, row)
+        })
     }
 
     /// Whether `row` passes the predicate.
@@ -354,18 +409,28 @@ impl Predicate {
 
 // === Filter ===
 
+/// Keep the rows of its input that satisfy every predicate.
+///
+/// The predicates are applied in one pass: each one narrows the selection left
+/// by the previous one, and the columns are gathered once at the end.
 pub struct FilterExec {
     input: Arc<dyn PhysicalPlan>,
-    predicate: Predicate,
+    predicates: Vec<Predicate>,
     schema: Arc<Schema>,
 }
 
 impl FilterExec {
     pub fn new(input: Arc<dyn PhysicalPlan>, predicate: Predicate) -> Self {
+        Self::new_all(input, vec![predicate])
+    }
+
+    /// A filter that keeps rows passing every predicate in `predicates`. With
+    /// no predicates every row passes.
+    pub fn new_all(input: Arc<dyn PhysicalPlan>, predicates: Vec<Predicate>) -> Self {
         let schema = Arc::new(input.schema().clone());
         Self {
             input,
-            predicate,
+            predicates,
             schema,
         }
     }
@@ -377,27 +442,38 @@ impl PhysicalPlan for FilterExec {
     }
 
     fn open(&self) -> Result<BatchStream, QueryError> {
-        let predicate = self.predicate.clone();
+        let predicates = self.predicates.clone();
         let schema = self.schema.clone();
         Ok(Box::new(self.input.open()?.map(move |batch| {
             let batch = batch?;
-            let keep = predicate.select(&batch);
+            let mut selection: Option<Vec<usize>> = None;
+            for predicate in &predicates {
+                selection = Some(predicate.select_from(&batch, selection.as_deref()));
+            }
+            let keep = selection.unwrap_or_else(|| (0..batch.row_count()).collect());
             let columns: Vec<ArrayRef> = batch.columns.iter().map(|c| c.take(&keep)).collect();
             Ok(Arc::new(Batch::new_unchecked(schema.clone(), columns)))
         })))
     }
 
     fn explain(&self, depth: usize, out: &mut String) {
-        let column = self
-            .schema
-            .field(self.predicate.column)
-            .map_or("?", |f| f.name.as_str());
-        let op = self.predicate.op;
-        let text = match op {
-            Comparison::IsNull | Comparison::IsNotNull => {
-                format!("Filter {column} {}", op.symbol())
-            }
-            _ => format!("Filter {column} {} {}", op.symbol(), self.predicate.value),
+        let parts: Vec<String> = self
+            .predicates
+            .iter()
+            .map(|p| {
+                let column = self.schema.field(p.column).map_or("?", |f| f.name.as_str());
+                match p.op {
+                    Comparison::IsNull | Comparison::IsNotNull => {
+                        format!("{column} {}", p.op.symbol())
+                    }
+                    _ => format!("{column} {} {}", p.op.symbol(), p.value),
+                }
+            })
+            .collect();
+        let text = if parts.is_empty() {
+            "Filter (none)".to_string()
+        } else {
+            format!("Filter {}", parts.join(" AND "))
         };
         push_line(out, depth, &text);
         self.input.explain(depth + 1, out);
@@ -742,6 +818,9 @@ pub struct SortExec {
     input: Arc<dyn PhysicalPlan>,
     sort_exprs: Vec<SortExpr>,
     schema: Arc<Schema>,
+    /// Keep only the first `keep` rows in sort order (top-k), when a `LIMIT`
+    /// sits above the sort. `None` keeps every row.
+    keep: Option<usize>,
 }
 
 impl SortExec {
@@ -751,7 +830,16 @@ impl SortExec {
             input,
             sort_exprs,
             schema,
+            keep: None,
         }
+    }
+
+    /// Keep only the first `keep` rows in sort order. A `LIMIT` above this
+    /// sort with `n` rows and `offset` skipped passes `Some(offset + n)`.
+    /// Ties keep their input order, exactly as a full sort would.
+    pub fn with_keep(mut self, keep: Option<usize>) -> Self {
+        self.keep = keep;
+        self
     }
 }
 
@@ -787,19 +875,34 @@ impl PhysicalPlan for SortExec {
             })
             .collect();
 
-        let mut order: Vec<usize> = (0..positions.len()).collect();
-        order.sort_by(|&a, &b| {
+        // Ties fall back to input position, so the order is total and equal to
+        // a stable sort. That also makes the top-k selection below exact.
+        let cmp = |a: &usize, b: &usize| {
             for (k, se) in self.sort_exprs.iter().enumerate() {
                 // `sort_cmp` gives NULL a deterministic position (first when
                 // ascending) instead of comparing it equal to non-null values.
-                let ord = keys[k][a].cmp(&keys[k][b]);
+                let ord = keys[k][*a].cmp(&keys[k][*b]);
                 let ord = if se.desc { ord.reverse() } else { ord };
                 if ord != Ordering::Equal {
                     return ord;
                 }
             }
-            Ordering::Equal
-        });
+            a.cmp(b)
+        };
+        let mut order: Vec<usize> = (0..positions.len()).collect();
+        match self.keep {
+            // Top-k: partition out the first `k` rows in O(n), then sort only those.
+            Some(k) if k < order.len() => {
+                if k == 0 {
+                    order.clear();
+                } else {
+                    order.select_nth_unstable_by(k - 1, cmp);
+                    order.truncate(k);
+                    order.sort_by(cmp);
+                }
+            }
+            _ => order.sort_by(cmp),
+        }
 
         let sorted: Vec<(usize, usize)> = order.iter().map(|&i| positions[i]).collect();
         let columns: Vec<ArrayRef> = self

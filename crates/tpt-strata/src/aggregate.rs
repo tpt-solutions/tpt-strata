@@ -26,7 +26,13 @@ use crate::schema::{DataType, Field, Schema};
 fn is_orderable(dt: DataType) -> bool {
     matches!(
         dt,
-        DataType::Boolean | DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Utf8
+        DataType::Boolean
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Float64
+            | DataType::Utf8
+            | DataType::Date
+            | DataType::Timestamp
     )
 }
 
@@ -401,10 +407,26 @@ impl PhysicalPlan for AggregateExec {
         }
 
         let mut scratch: Vec<KeyPart<'_>> = Vec::with_capacity(self.group_by.len());
+        // With one group column, index on the key itself: no per-row Vec.
+        let mut single_index: FastMap<KeyPart<'_>, usize> = FastMap::default();
         for (bi, batch) in batches.iter().enumerate() {
             for row in 0..batch.row_count() {
                 let gid = if global {
                     0
+                } else if let [c] = self.group_by.as_slice() {
+                    let key = key_at(&batch.columns[*c], row);
+                    match single_index.get(&key) {
+                        Some(&g) => g,
+                        None => {
+                            let g = first.len();
+                            first.push(Some((bi, row)));
+                            single_index.insert(key, g);
+                            for s in &mut states {
+                                s.push_group();
+                            }
+                            g
+                        }
+                    }
                 } else {
                     scratch.clear();
                     scratch.extend(

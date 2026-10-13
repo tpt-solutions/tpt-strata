@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::array::{ArrayRef, BoolArray, F64Array, I64Array, StrArray};
+use crate::array::{ArrayRef, BoolArray, F64Array, I32Array, I64Array, StrArray};
 use crate::batch::Batch;
 use crate::error::QueryError;
 use crate::format::Table;
@@ -129,6 +129,24 @@ fn column_array(dt: DataType, cells: &[Cell]) -> ArrayRef {
                 })
                 .collect(),
         )),
+        DataType::Date => ArrayRef::Date(I32Array::from_nulls(
+            cells
+                .iter()
+                .map(|c| {
+                    c.as_ref()
+                        .and_then(|v| crate::temporal::parse_date(v.trim()))
+                })
+                .collect(),
+        )),
+        DataType::Timestamp => ArrayRef::Timestamp(I64Array::from_nulls(
+            cells
+                .iter()
+                .map(|c| {
+                    c.as_ref()
+                        .and_then(|v| crate::temporal::parse_timestamp(v.trim()))
+                })
+                .collect(),
+        )),
         DataType::Float64 => ArrayRef::Float64(F64Array::from_nulls(
             cells
                 .iter()
@@ -144,7 +162,12 @@ fn column_array(dt: DataType, cells: &[Cell]) -> ArrayRef {
                 .map(|c| c.as_ref().map(|v| v.trim().eq_ignore_ascii_case("true")))
                 .collect(),
         )),
-        DataType::Utf8 | DataType::Int32 => ArrayRef::Utf8(StrArray::from_nulls(cells.to_vec())),
+        DataType::Utf8 | DataType::Int32 => ArrayRef::Utf8(StrArray::from_nulls(
+            cells
+                .iter()
+                .map(|c| c.as_deref().map(std::sync::Arc::<str>::from))
+                .collect(),
+        )),
     }
 }
 

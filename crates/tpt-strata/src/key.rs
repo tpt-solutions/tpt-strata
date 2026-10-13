@@ -89,6 +89,14 @@ pub fn key_at(col: &ArrayRef, row: usize) -> KeyPart<'_> {
             Some(v) => KeyPart::F64(f64_key_bits(v)),
             None => KeyPart::Null,
         },
+        ArrayRef::Date(a) => match a.0.get(row).copied().flatten() {
+            Some(v) => KeyPart::I32(v),
+            None => KeyPart::Null,
+        },
+        ArrayRef::Timestamp(a) => match a.0.get(row).copied().flatten() {
+            Some(v) => KeyPart::I64(v),
+            None => KeyPart::Null,
+        },
         ArrayRef::Utf8(a) => match a.0.get(row).and_then(|v| v.as_deref()) {
             Some(s) => KeyPart::Str(s),
             None => KeyPart::Null,

@@ -66,6 +66,8 @@ fn scalar_json(v: Option<Scalar>) -> Value {
             .map(Value::Number)
             .unwrap_or(Value::Null),
         Some(Scalar::Str(s)) => Value::String(s),
+        Some(Scalar::Date(d)) => Value::String(tpt_strata::temporal::format_date(d)),
+        Some(Scalar::Timestamp(t)) => Value::String(tpt_strata::temporal::format_timestamp(t)),
     }
 }
 

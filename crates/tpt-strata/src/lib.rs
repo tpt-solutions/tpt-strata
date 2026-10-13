@@ -36,6 +36,7 @@ pub mod key;
 pub mod query;
 pub mod schema;
 pub mod sql;
+pub mod temporal;
 pub mod types;
 
 pub use array::{Array, ArrayRef, BoolArray, F64Array, I32Array, I64Array, StrArray};

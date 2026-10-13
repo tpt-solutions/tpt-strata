@@ -277,8 +277,11 @@ want to compose plans yourself.
 - **In-memory only.** Data must fit in memory.
 - **`Sort` and `Join` fully materialize their input.** There is no streaming or
   spill-to-disk. See [`ARCHITECTURE.md`](https://github.com/tpt-solutions/tpt-strata/blob/master/ARCHITECTURE.md).
-- **Five native types.** Anything else needs converting before it reaches the
-  engine. Use [`tpt-strata-parquet`](https://crates.io/crates/tpt-strata-parquet)
+- **Seven native types:** booleans, 32- and 64-bit integers, 64-bit floats,
+  strings, dates and timestamps. A `DATE` is days since 1970-01-01 and a
+  `TIMESTAMP` is microseconds since the epoch, with no time zone. Anything else
+  needs converting before it reaches the engine. CSV and JSON never infer dates:
+  text stays text. Use [`tpt-strata-parquet`](https://crates.io/crates/tpt-strata-parquet)
   for Parquet input.
 - **Equi-joins only.** Inner, LEFT, RIGHT and FULL joins, chained, on one key
   column per side. Non-equality join conditions are not supported.

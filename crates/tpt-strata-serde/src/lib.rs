@@ -485,6 +485,9 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer {
             Scalar::I64(v) => visitor.visit_i64(v),
             Scalar::F64(v) => visitor.visit_f64(v),
             Scalar::Str(s) => visitor.visit_string(s),
+            // Dates and timestamps cross the serde boundary as ISO-8601 text.
+            Scalar::Date(d) => visitor.visit_string(tpt_strata::temporal::format_date(d)),
+            Scalar::Timestamp(t) => visitor.visit_string(tpt_strata::temporal::format_timestamp(t)),
         }
     }
 

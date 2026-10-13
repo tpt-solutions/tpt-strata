@@ -773,6 +773,41 @@ impl Parser {
                 return Err(self.perr("integer out of range '9223372036854775808'"));
             }
             Tok::Number(n) => Scalar::F64(if neg { -n } else { n }),
+            Tok::Ident(word)
+                if word.eq_ignore_ascii_case("DATE") || word.eq_ignore_ascii_case("TIMESTAMP") =>
+            {
+                if neg {
+                    return Err(self.perr("cannot negate a date or timestamp"));
+                }
+                let is_date = word.eq_ignore_ascii_case("DATE");
+                let text = match self.next() {
+                    Tok::StrLit(s) => s,
+                    other => {
+                        return Err(self.perr(format!(
+                            "expected a quoted {} value after {word}, found '{}'",
+                            if is_date { "date" } else { "timestamp" },
+                            other.describe()
+                        )));
+                    }
+                };
+                if is_date {
+                    match crate::temporal::parse_date(&text) {
+                        Some(d) => Scalar::Date(d),
+                        None => {
+                            return Err(self.perr(format!("invalid date '{text}'; use YYYY-MM-DD")))
+                        }
+                    }
+                } else {
+                    match crate::temporal::parse_timestamp(&text) {
+                        Some(t) => Scalar::Timestamp(t),
+                        None => {
+                            return Err(self.perr(format!(
+                                "invalid timestamp '{text}'; use YYYY-MM-DD HH:MM[:SS[.ffffff]]"
+                            )))
+                        }
+                    }
+                }
+            }
             Tok::StrLit(s) => {
                 if neg {
                     return Err(self.perr("cannot negate a string literal"));
@@ -965,7 +1000,12 @@ impl Parser {
             }
         };
         // A column on the right is a column-to-column comparison.
-        if matches!(self.peek(), Tok::Ident(_)) {
+        // `DATE '...'` and `TIMESTAMP '...'` are literals, not column names.
+        let typed_literal = matches!(
+            self.peek(),
+            Tok::Ident(w) if w.eq_ignore_ascii_case("DATE") || w.eq_ignore_ascii_case("TIMESTAMP")
+        ) && matches!(self.peek_at(1), Tok::StrLit(_));
+        if matches!(self.peek(), Tok::Ident(_)) && !typed_literal {
             let right = self.parse_operand(clause)?;
             if matches!(right, Operand::Aggregate { .. }) && clause == "WHERE" {
                 return Err(self.perr(
@@ -1623,7 +1663,7 @@ fn plan_plain(
                 desc: *desc,
             });
         }
-        plan = Arc::new(SortExec::new(plan, keys));
+        plan = Arc::new(SortExec::new(plan, keys).with_keep(top_k(sel)));
     }
 
     let input = plan.schema().clone();
@@ -1765,7 +1805,7 @@ fn plan_grouped(
                 desc: *desc,
             });
         }
-        plan = Arc::new(SortExec::new(plan, keys));
+        plan = Arc::new(SortExec::new(plan, keys).with_keep(top_k(sel)));
     }
 
     let mut items = Vec::new();
@@ -2035,19 +2075,28 @@ fn check_comparable(
     })
 }
 
-/// Apply a bound condition. A conjunction of plain comparisons becomes a chain
-/// of filters, which keeps the typed fast path. Anything else is one filter.
+/// The number of rows a LIMIT keeps from the sort below it: `offset + limit`.
+/// Sort and limit both run after any DISTINCT or GROUP BY, so a top-k taken
+/// at the sort gives the same rows as sorting everything and then limiting.
+fn top_k(sel: &Select) -> Option<usize> {
+    sel.limit.map(|n| sel.offset.unwrap_or(0).saturating_add(n))
+}
+
+/// Apply a bound condition. A conjunction of plain comparisons becomes one
+/// fused filter, which keeps the typed fast path and copies the columns once.
+/// Anything else is a condition tree in one filter.
 fn apply_filter(plan: Arc<dyn PhysicalPlan>, cond: Condition) -> Arc<dyn PhysicalPlan> {
     match cond {
         Condition::Cmp(p) => Arc::new(FilterExec::new(plan, p)),
         Condition::And(parts) if parts.iter().all(|c| matches!(c, Condition::Cmp(_))) => {
-            let mut plan = plan;
-            for part in parts {
-                if let Condition::Cmp(p) = part {
-                    plan = Arc::new(FilterExec::new(plan, p));
-                }
-            }
-            plan
+            let predicates = parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    Condition::Cmp(p) => Some(p),
+                    _ => None,
+                })
+                .collect();
+            Arc::new(FilterExec::new_all(plan, predicates))
         }
         other => Arc::new(CondFilterExec::new(plan, other)),
     }

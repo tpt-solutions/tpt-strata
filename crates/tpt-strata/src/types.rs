@@ -16,6 +16,10 @@ pub enum Scalar {
     F64(f64),
     /// A UTF-8 string.
     Str(String),
+    /// A calendar date: days since 1970-01-01.
+    Date(i32),
+    /// A timestamp without a time zone: microseconds since 1970-01-01 00:00:00.
+    Timestamp(i64),
 }
 
 /// Canonical bit pattern for an `f64` used as a group or join key.
@@ -45,6 +49,8 @@ impl PartialEq for Scalar {
             (Scalar::I64(a), Scalar::I64(b)) => a == b,
             (Scalar::F64(a), Scalar::F64(b)) => f64_key_bits(*a) == f64_key_bits(*b),
             (Scalar::Str(a), Scalar::Str(b)) => a == b,
+            (Scalar::Date(a), Scalar::Date(b)) => a == b,
+            (Scalar::Timestamp(a), Scalar::Timestamp(b)) => a == b,
             _ => false,
         }
     }
@@ -62,6 +68,8 @@ impl std::hash::Hash for Scalar {
             Scalar::I64(v) => v.hash(state),
             Scalar::F64(v) => f64_key_bits(*v).hash(state),
             Scalar::Str(v) => v.hash(state),
+            Scalar::Date(v) => v.hash(state),
+            Scalar::Timestamp(v) => v.hash(state),
         }
     }
 }
@@ -76,6 +84,8 @@ impl Scalar {
             Scalar::I64(_) => "i64",
             Scalar::F64(_) => "f64",
             Scalar::Str(_) => "str",
+            Scalar::Date(_) => "date",
+            Scalar::Timestamp(_) => "timestamp",
         }
     }
 
@@ -107,6 +117,8 @@ impl fmt::Display for Scalar {
                 }
             }
             Scalar::Str(v) => write!(f, "{v}"),
+            Scalar::Date(v) => write!(f, "{}", crate::temporal::format_date(*v)),
+            Scalar::Timestamp(v) => write!(f, "{}", crate::temporal::format_timestamp(*v)),
         }
     }
 }
@@ -168,6 +180,8 @@ pub fn scalar_cmp(a: &Scalar, b: &Scalar) -> Ordering {
         (Scalar::F64(a), Scalar::F64(b)) => a.total_cmp(b),
         (Scalar::Str(a), Scalar::Str(b)) => a.cmp(b),
         (Scalar::Bool(a), Scalar::Bool(b)) => a.cmp(b),
+        (Scalar::Date(a), Scalar::Date(b)) => a.cmp(b),
+        (Scalar::Timestamp(a), Scalar::Timestamp(b)) => a.cmp(b),
         _ => Ordering::Equal,
     }
 }

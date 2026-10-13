@@ -8,6 +8,10 @@ pub enum DataType {
     Int64,
     Float64,
     Utf8,
+    /// Days since 1970-01-01, stored as `i32`.
+    Date,
+    /// Microseconds since 1970-01-01 00:00:00, no time zone, stored as `i64`.
+    Timestamp,
 }
 
 impl DataType {
@@ -19,6 +23,8 @@ impl DataType {
             DataType::Int64 => "i64",
             DataType::Float64 => "f64",
             DataType::Utf8 => "str",
+            DataType::Date => "date",
+            DataType::Timestamp => "timestamp",
         }
     }
 }

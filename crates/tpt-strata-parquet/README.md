@@ -89,11 +89,12 @@ types:
 | `INT64`, `UINT32` | `Int64` |
 | `FLOAT`, `DOUBLE` | `Float64` |
 | `STRING`, `LARGE_STRING`, `STRING_VIEW` | `Utf8` |
-| `DATE32` (days since 1970-01-01) | `Int32` (raw days) |
-| `TIMESTAMP` (any unit) | `Int64` (raw epoch value, in the column's unit) |
+| `DATE32` (days since 1970-01-01) | `Date` |
+| `TIMESTAMP` (any unit, with or without a zone) | `Timestamp`, in microseconds since the epoch (a zone-aware value is read as UTC) |
 
-Date and timestamp columns keep their raw numbers. They can be compared and
-sorted, but they are not formatted as dates.
+Dates and timestamps are native types. They compare, sort, group and join, and
+they print as ISO-8601 text. Writing a `Date` or `Timestamp` column produces
+`DATE32` or `TIMESTAMP(MICROS)`.
 
 Nullability is preserved. Null values in the file become `Scalar::Null` in the
 table, across every row group.

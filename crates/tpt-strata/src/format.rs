@@ -70,6 +70,8 @@ impl Table {
                     Scalar::I64(_) => DataType::Int64,
                     Scalar::F64(_) => DataType::Float64,
                     Scalar::Str(_) => DataType::Utf8,
+                    Scalar::Date(_) => DataType::Date,
+                    Scalar::Timestamp(_) => DataType::Timestamp,
                     Scalar::Null => unreachable!("filtered above"),
                 })
                 .ok_or_else(|| QueryError::UnsupportedOperation {
@@ -338,7 +340,31 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
                     _ => None,
                 })
                 .collect();
+            let v = v
+                .into_iter()
+                .map(|s| s.map(std::sync::Arc::<str>::from))
+                .collect();
             Ok(ArrayRef::Utf8(StrArray(v)))
+        }
+        DataType::Date => {
+            let v: Vec<Option<i32>> = values
+                .iter()
+                .map(|s| match s {
+                    Scalar::Date(d) => Some(*d),
+                    _ => None,
+                })
+                .collect();
+            Ok(ArrayRef::Date(I32Array(v)))
+        }
+        DataType::Timestamp => {
+            let v: Vec<Option<i64>> = values
+                .iter()
+                .map(|s| match s {
+                    Scalar::Timestamp(t) => Some(*t),
+                    _ => None,
+                })
+                .collect();
+            Ok(ArrayRef::Timestamp(I64Array(v)))
         }
     }
 }

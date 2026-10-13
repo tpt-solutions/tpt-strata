@@ -113,3 +113,35 @@ cargo run --release -- 1000000
 The first build compiles DataFusion and DuckDB, which takes about fourteen
 minutes on the reference machine. The output is in `bench/compare/results.md`
 (not committed).
+
+## Phase 15 run (2026-10-13)
+
+Same data and queries, 1,000,000 rows, median of 5 after one warm-up. All
+engines return the same results. This machine ran slower than the earlier
+runs: DataFusion's load time rose from 37 ms to 60 ms, so compare ratios
+within this table, not across tables.
+
+| query | tpt-strata (1 thread) | DataFusion (1 partition) | DataFusion (all cores) | DuckDB (1 thread) | DuckDB (all cores) |
+|---|---|---|---|---|---|
+| Q1 group by + 3 aggregates | 32.4 ms | 10.1 ms | 5.76 ms | 27.9 ms | 8.59 ms |
+| Q2 filter + sort + limit | 17.7 ms | 5.70 ms | 2.51 ms | 14.4 ms | 4.39 ms |
+| Q3 join + group by | 94.5 ms | 11.6 ms | 5.65 ms | 8.96 ms | 6.13 ms |
+
+Load (Parquet to engine format): tpt-strata 186 ms, DataFusion 60 ms,
+DuckDB 969 ms (one thread) and 189 ms (20 threads).
+
+What changed, and what the measurements showed:
+
+- Q2 dropped from 54 ms to 18 ms. A stage breakdown on 100k rows found that
+  filtering spent most of its time copying `String`s. Strings are now shared
+  as `Arc<str>`, two predicates run in one pass, and `ORDER BY … LIMIT`
+  keeps only the top rows.
+- Q1 barely moved. Single-key grouping is faster, but each row still
+  dispatches every aggregate separately. Batch-at-a-time accumulation is the
+  next step.
+- Q3 is still about 8 times DataFusion on one thread. The join is the largest
+  gap and has not been profiled on its own.
+
+Parity with DataFusion and DuckDB is not reached. The remaining gaps are the
+join, the per-row aggregate dispatch, and the layout of arrays as
+`Vec<Option<T>>`.

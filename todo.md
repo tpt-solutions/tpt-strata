@@ -241,8 +241,8 @@ in `docs/v1.1-scope.md`. Adding a type touches the whole native format
 (`Scalar`, `DataType`, arrays, engine comparisons, `format.rs`, bridge), so
 each must be bought by a real consumer schema.
 
-- [ ] Native `Date`/`Timestamp` types — deferred. Parquet DATE32 and
-      TIMESTAMP columns import as their raw integers (Phase 13), which covers
+- [x] Native `Date`/`Timestamp` types — implemented 2026-10-13 at the owner's request, ahead of a consumer schema. Parquet DATE32 and
+      TIMESTAMP columns import as native types. The old raw-integer import is gone.
       the queryable case without a new native type.
 - [ ] Native `Decimal`, `Binary`, `Float32`, `Int8`/`Int16`, unsigned types —
       deferred. Narrow and unsigned integers and Float32 are widened to
@@ -326,7 +326,7 @@ Start with the parser change, since the cheap predicates fit into it.
 
 ### 11c. Types
 
-- [ ] Date/Timestamp: start only after a consumer schema names a real column
+- [x] Date/Timestamp: done (see Phase 15). The blast-radius list was the work plan:
       (per v1.1-scope.md). Write the blast-radius list (Scalar, DataType,
       arrays, comparisons, format.rs inference, Parquet bridge) before
       estimating.
@@ -571,7 +571,7 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
       an elevated install. From an elevated shell, run
       `winget install -e --id Microsoft.WindowsADK --override "/quiet /features OptionId.WindowsPerformanceToolkit"`,
       then `samply record --save-only -o profile.json.gz -- target/release/deps/queries-*.exe`.
-- [ ] Phase 11c: native Date and Timestamp types. Gated on a consumer schema.
+- [x] Phase 11c: native Date and Timestamp types, done (Phase 15).
 - [ ] Phase 9 and 12e: publishing, tags, and the tpt-simd evaluation. Out of
       scope until a release is decided.
 
@@ -583,3 +583,40 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
 - MSRV: `tpt-strata` and `tpt-strata-serde` build and test on 1.75.
   `tpt-strata-parquet`, `tpt-strata-cli` and `tpt-strata-wasm` build on 1.85,
   and so does the whole workspace.
+
+## Phase 15 — Native dates and performance pass (unreleased)
+
+> Work on 2026-10-13, at the owner's request. Date and Timestamp were deferred
+> until a consumer schema existed; the owner asked to go ahead. Profiling used
+> per-stage timing, because `samply` still needs an elevated `xperf` install.
+
+### Native dates
+
+- [x] `DATE` (`DataType::Date`, `Scalar::Date`, days since 1970-01-01) and
+      `TIMESTAMP` (`DataType::Timestamp`, microseconds, no time zone).
+- [x] Compare, sort, group, join, and MIN/MAX. SUM and AVG reject them.
+- [x] SQL `DATE '…'` and `TIMESTAMP '…'` literals. A plain string against a
+      date column is parsed; an invalid one gets a diagnostic naming the format.
+- [x] Parquet DATE32 and TIMESTAMP (any unit or zone, read as UTC micros) import
+      and write as native types.
+- [x] Serde and WASM render them as ISO text.
+- [ ] CSV and JSON do not infer dates. Text stays text. Deliberate for now;
+      revisit with a consumer.
+
+### Performance (measured; see docs/benchmark-comparison.md, Phase 15 run)
+
+- [x] Strings as `Arc<str>`: a stage breakdown showed filters spending most of
+      their time copying `String`s. Two filters: 19.7 ms → 3–4 ms per 100k rows.
+- [x] Fused predicates: one filter pass, columns gathered once.
+- [x] Float fast path for `Float64` columns against `Float64` literals.
+- [x] Top-k: `ORDER BY … LIMIT` keeps `offset + n` rows at the sort. Ties keep
+      input order. Tested against a full sort.
+- [x] Single-key GROUP BY indexes on the key, with no per-row `Vec`.
+- [x] Q2 (filter, sort, limit): 54 ms → 18 ms on 1M rows.
+- [ ] Q1 (GROUP BY): 34.7 → 32.4 ms. Aggregates still dispatch per row. Next:
+      batch-at-a-time accumulation with typed column loops.
+- [ ] Q3 (join): 104 → 95 ms, still about 8× DataFusion on one thread. Not yet
+      profiled.
+- [ ] Parity is not reached. Remaining gaps: join, per-row aggregate dispatch,
+      `Vec<Option<T>>` array layout, and single-threaded execution.
+- [ ] Profiler re-run (12f) is still blocked on elevation.

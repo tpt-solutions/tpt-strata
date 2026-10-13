@@ -85,7 +85,7 @@ fn facts_table(d: &Data) -> Table {
     ]));
     let cols = vec![
         ArrayRef::Int64(I64Array::new(d.id.clone())),
-        ArrayRef::Utf8(StrArray::new(d.region.clone())),
+        ArrayRef::Utf8(StrArray::new(d.region.iter().map(|s| std::sync::Arc::<str>::from(s.as_str())).collect())),
         ArrayRef::Int64(I64Array::new(d.quantity.clone())),
         ArrayRef::Float64(F64Array::new(d.price.clone())),
         ArrayRef::Int64(I64Array::new(d.dim_id.clone())),
@@ -95,7 +95,7 @@ fn facts_table(d: &Data) -> Table {
 
 fn dims_table() -> Table {
     let ids: Vec<i64> = (0..1000).collect();
-    let labels: Vec<String> = ids.iter().map(|i| format!("label-{:02}", i % 20)).collect();
+    let labels: Vec<std::sync::Arc<str>> = ids.iter().map(|i| std::sync::Arc::from(format!("label-{:02}", i % 20))).collect();
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("label", DataType::Utf8, false),
@@ -165,6 +165,7 @@ fn table_cells(t: &Table) -> Vec<Vec<Cell>> {
                         Some(tpt_strata::Scalar::F64(v)) => Cell::Float(v),
                         Some(tpt_strata::Scalar::Bool(b)) => Cell::Int(b as i64),
                         Some(tpt_strata::Scalar::Str(s)) => Cell::Text(s),
+                        Some(d @ tpt_strata::Scalar::Date(_)) | Some(d @ tpt_strata::Scalar::Timestamp(_)) => Cell::Text(d.to_string()),
                     })
                     .collect(),
             );

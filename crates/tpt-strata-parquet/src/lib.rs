@@ -19,8 +19,8 @@
 //! | INT64, UINT32                           | i64        |
 //! | FLOAT, DOUBLE                           | f64        |
 //! | STRING, LARGE_STRING, STRING_VIEW       | str        |
-//! | DATE32 (days since 1970-01-01)          | i32        |
-//! | TIMESTAMP (raw epoch value, in its unit)| i64        |
+//! | DATE32 (days since 1970-01-01)          | date       |
+//! | TIMESTAMP (any unit, microseconds in)   | timestamp  |
 //!
 //! Other types (unsigned 64-bit, decimals, binary, nested) are rejected with a
 //! diagnostic naming the column. Use [`read_parquet_columns`] to read only the
@@ -31,11 +31,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef as ArrowArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array,
-    StringArray,
+    Array, ArrayRef as ArrowArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array,
+    Int64Array, StringArray, TimestampMicrosecondArray,
 };
 use arrow::compute::cast;
-use arrow::datatypes::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
+use arrow::datatypes::{
+    DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema, TimeUnit,
+};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -75,11 +77,13 @@ fn import_target(dt: &ArrowType) -> Option<(DataType, ArrowType)> {
         | ArrowType::Int16
         | ArrowType::Int32
         | ArrowType::UInt8
-        | ArrowType::UInt16
-        | ArrowType::Date32 => (DataType::Int32, ArrowType::Int32),
-        ArrowType::Int64 | ArrowType::UInt32 | ArrowType::Timestamp(_, _) => {
-            (DataType::Int64, ArrowType::Int64)
-        }
+        | ArrowType::UInt16 => (DataType::Int32, ArrowType::Int32),
+        ArrowType::Date32 => (DataType::Date, ArrowType::Int32),
+        ArrowType::Timestamp(_, _) => (
+            DataType::Timestamp,
+            ArrowType::Timestamp(TimeUnit::Microsecond, None),
+        ),
+        ArrowType::Int64 | ArrowType::UInt32 => (DataType::Int64, ArrowType::Int64),
         ArrowType::Float16 | ArrowType::Float32 | ArrowType::Float64 => {
             (DataType::Float64, ArrowType::Float64)
         }
@@ -96,6 +100,8 @@ enum Collector {
     I64(Vec<Option<i64>>),
     F64(Vec<Option<f64>>),
     Str(Vec<Option<String>>),
+    Date(Vec<Option<i32>>),
+    Timestamp(Vec<Option<i64>>),
 }
 
 impl Collector {
@@ -106,6 +112,8 @@ impl Collector {
             DataType::Int64 => Collector::I64(Vec::new()),
             DataType::Float64 => Collector::F64(Vec::new()),
             DataType::Utf8 => Collector::Str(Vec::new()),
+            DataType::Date => Collector::Date(Vec::new()),
+            DataType::Timestamp => Collector::Timestamp(Vec::new()),
         }
     }
 
@@ -146,6 +154,18 @@ impl Collector {
                     });
                 }
             }
+            Collector::Date(v) => {
+                let a = arrow_downcast::<Int32Array>(arr, column, "DATE")?;
+                for i in 0..a.len() {
+                    v.push(if a.is_null(i) { None } else { Some(a.value(i)) });
+                }
+            }
+            Collector::Timestamp(v) => {
+                let a = arrow_downcast::<TimestampMicrosecondArray>(arr, column, "TIMESTAMP")?;
+                for i in 0..a.len() {
+                    v.push(if a.is_null(i) { None } else { Some(a.value(i)) });
+                }
+            }
         }
         Ok(())
     }
@@ -156,7 +176,14 @@ impl Collector {
             Collector::I32(v) => tpt_strata::I32Array::from_nulls(v).into(),
             Collector::I64(v) => tpt_strata::I64Array::from_nulls(v).into(),
             Collector::F64(v) => tpt_strata::F64Array::from_nulls(v).into(),
-            Collector::Str(v) => tpt_strata::StrArray::from_nulls(v).into(),
+            Collector::Str(v) => tpt_strata::StrArray::from_nulls(
+                v.into_iter()
+                    .map(|s| s.map(std::sync::Arc::<str>::from))
+                    .collect(),
+            )
+            .into(),
+            Collector::Date(v) => ArrayRef::Date(tpt_strata::I32Array::from_nulls(v)),
+            Collector::Timestamp(v) => ArrayRef::Timestamp(tpt_strata::I64Array::from_nulls(v)),
         }
     }
 }
@@ -330,6 +357,8 @@ fn arrow_type(dt: DataType) -> ArrowType {
         DataType::Int64 => ArrowType::Int64,
         DataType::Float64 => ArrowType::Float64,
         DataType::Utf8 => ArrowType::Utf8,
+        DataType::Date => ArrowType::Date32,
+        DataType::Timestamp => ArrowType::Timestamp(TimeUnit::Microsecond, None),
     }
 }
 
@@ -339,6 +368,11 @@ fn to_arrow(col: &ArrayRef) -> ArrowArrayRef {
         ArrayRef::Int32(a) => Arc::new(Int32Array::from(a.0.clone())),
         ArrayRef::Int64(a) => Arc::new(Int64Array::from(a.0.clone())),
         ArrayRef::Float64(a) => Arc::new(Float64Array::from(a.0.clone())),
-        ArrayRef::Utf8(a) => Arc::new(StringArray::from(a.0.clone())),
+        ArrayRef::Utf8(a) => {
+            let values: Vec<Option<&str>> = a.0.iter().map(|s| s.as_deref()).collect();
+            Arc::new(StringArray::from(values))
+        }
+        ArrayRef::Date(a) => Arc::new(Date32Array::from(a.0.clone())),
+        ArrayRef::Timestamp(a) => Arc::new(TimestampMicrosecondArray::from(a.0.clone())),
     }
 }

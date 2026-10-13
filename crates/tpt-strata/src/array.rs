@@ -21,6 +21,10 @@ pub enum ArrayRef {
     Int64(I64Array),
     Float64(F64Array),
     Utf8(StrArray),
+    /// Days since 1970-01-01, held in an `I32Array`.
+    Date(I32Array),
+    /// Microseconds since the epoch, held in an `I64Array`.
+    Timestamp(I64Array),
 }
 
 impl ArrayRef {
@@ -32,6 +36,8 @@ impl ArrayRef {
             ArrayRef::Int64(a) => a.data_type(),
             ArrayRef::Float64(a) => a.data_type(),
             ArrayRef::Utf8(a) => a.data_type(),
+            ArrayRef::Date(_) => DataType::Date,
+            ArrayRef::Timestamp(_) => DataType::Timestamp,
         }
     }
 
@@ -43,6 +49,8 @@ impl ArrayRef {
             ArrayRef::Int64(a) => a.len(),
             ArrayRef::Float64(a) => a.len(),
             ArrayRef::Utf8(a) => a.len(),
+            ArrayRef::Date(a) => a.len(),
+            ArrayRef::Timestamp(a) => a.len(),
         }
     }
 
@@ -59,6 +67,8 @@ impl ArrayRef {
             ArrayRef::Int64(a) => a.is_null(i),
             ArrayRef::Float64(a) => a.is_null(i),
             ArrayRef::Utf8(a) => a.is_null(i),
+            ArrayRef::Date(a) => a.is_null(i),
+            ArrayRef::Timestamp(a) => a.is_null(i),
         }
     }
 
@@ -70,6 +80,8 @@ impl ArrayRef {
             ArrayRef::Int64(a) => a.null_count(),
             ArrayRef::Float64(a) => a.null_count(),
             ArrayRef::Utf8(a) => a.null_count(),
+            ArrayRef::Date(a) => a.null_count(),
+            ArrayRef::Timestamp(a) => a.null_count(),
         }
     }
 
@@ -81,6 +93,14 @@ impl ArrayRef {
             ArrayRef::Int64(a) => a.get(i),
             ArrayRef::Float64(a) => a.get(i),
             ArrayRef::Utf8(a) => a.get(i),
+            ArrayRef::Date(a) => match a.get(i) {
+                Some(Scalar::I32(v)) => Some(Scalar::Date(v)),
+                _ => None,
+            },
+            ArrayRef::Timestamp(a) => match a.get(i) {
+                Some(Scalar::I64(v)) => Some(Scalar::Timestamp(v)),
+                _ => None,
+            },
         }
     }
 
@@ -116,6 +136,18 @@ impl ArrayRef {
                     .collect();
                 ArrayRef::Float64(F64Array(vals))
             }
+            ArrayRef::Date(a) => ArrayRef::Date(I32Array(
+                indices
+                    .iter()
+                    .map(|&i| a.0.get(i).copied().flatten())
+                    .collect(),
+            )),
+            ArrayRef::Timestamp(a) => ArrayRef::Timestamp(I64Array(
+                indices
+                    .iter()
+                    .map(|&i| a.0.get(i).copied().flatten())
+                    .collect(),
+            )),
             ArrayRef::Utf8(a) => {
                 let vals = indices
                     .iter()
@@ -170,6 +202,33 @@ impl ArrayRef {
     }
 }
 
+/// The owned payload of an element, for building a `Scalar` from a borrowed value.
+/// Strings are shared as `Arc<str>` in arrays, so cloning a row is a
+/// reference-count bump rather than a heap copy.
+trait OwnedValue {
+    type Owned;
+    fn owned(&self) -> Self::Owned;
+}
+
+macro_rules! owned_copy {
+    ($($t:ty),*) => {$(
+        impl OwnedValue for $t {
+            type Owned = $t;
+            fn owned(&self) -> $t {
+                *self
+            }
+        }
+    )*};
+}
+owned_copy!(bool, i32, i64, f64);
+
+impl OwnedValue for std::sync::Arc<str> {
+    type Owned = String;
+    fn owned(&self) -> String {
+        self.to_string()
+    }
+}
+
 macro_rules! impl_array {
     ($name:ident, $variant:ident, $data_type:expr, $ty:ty, $scalar:ident) => {
         #[derive(Debug, Clone, Default)]
@@ -220,7 +279,7 @@ macro_rules! impl_array {
                 self.0
                     .get(i)
                     .and_then(|v| v.as_ref())
-                    .map(|v| Scalar::$scalar(v.clone()))
+                    .map(|v| Scalar::$scalar(v.owned()))
             }
         }
 
@@ -247,7 +306,7 @@ impl_array!(BoolArray, Boolean, DataType::Boolean, bool, Bool);
 impl_array!(I32Array, Int32, DataType::Int32, i32, I32);
 impl_array!(I64Array, Int64, DataType::Int64, i64, I64);
 impl_array!(F64Array, Float64, DataType::Float64, f64, F64);
-impl_array!(StrArray, Utf8, DataType::Utf8, String, Str);
+impl_array!(StrArray, Utf8, DataType::Utf8, std::sync::Arc<str>, Str);
 
 /// A zero-length array of the given type.
 pub(crate) fn empty_array(data_type: DataType) -> ArrayRef {
@@ -257,5 +316,7 @@ pub(crate) fn empty_array(data_type: DataType) -> ArrayRef {
         DataType::Int64 => ArrayRef::Int64(I64Array(Vec::new())),
         DataType::Float64 => ArrayRef::Float64(F64Array(Vec::new())),
         DataType::Utf8 => ArrayRef::Utf8(StrArray(Vec::new())),
+        DataType::Date => ArrayRef::Date(I32Array(Vec::new())),
+        DataType::Timestamp => ArrayRef::Timestamp(I64Array(Vec::new())),
     }
 }

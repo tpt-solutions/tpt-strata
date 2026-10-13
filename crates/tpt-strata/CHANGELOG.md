@@ -18,8 +18,27 @@ this crate follows [Semantic Versioning](https://semver.org/).
 - `JoinKind` and `JoinExec::try_new_join`. `try_new_kind(bool)` still works and
   maps to `Left` or `Inner`.
 - `docs/errors.md`: one section per error `kind()`, with real messages.
+- Native `DATE` (`DataType::Date`, `Scalar::Date`, days since 1970-01-01) and
+  `TIMESTAMP` (`DataType::Timestamp`, `Scalar::Timestamp`, microseconds, no
+  time zone). They compare, sort, group, join and feed MIN/MAX, and they print
+  as ISO-8601 text.
+- SQL: `DATE '2026-10-13'` and `TIMESTAMP '2026-10-13 08:05:09.25'` literals. A
+  plain string compared with a date or timestamp column is parsed as one, and
+  an invalid one is a diagnostic naming the format.
+- `tpt_strata::temporal`: strict parsing and formatting, with no dependencies.
+- Top-k: `ORDER BY ... LIMIT n` keeps `offset + n` rows at the sort, using a
+  partial selection. Ties keep input order, as a full sort would.
 
 ### Changed
+
+- Strings are stored as `Arc<str>`, so copying a row is a reference-count bump
+  rather than a heap copy. `StrArray` holds `Option<Arc<str>>`.
+- A conjunction of predicates runs as one filter pass (`FilterExec::new_all`),
+  and the columns are gathered once.
+- Float columns compared with float literals use a direct comparison.
+- A single-column GROUP BY indexes on the key itself, with no per-row `Vec`.
+- Parquet `DATE32` and `TIMESTAMP` import as `Date` and `Timestamp` rather than
+  raw integers. Writing them produces `DATE32` and `TIMESTAMP(MICROS)`.
 
 - `JoinExec` plans print as `Left HashJoin`, `Right HashJoin` or `Full HashJoin`
   instead of `HashJoin` for outer joins.

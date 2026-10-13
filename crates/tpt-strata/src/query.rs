@@ -63,6 +63,34 @@ pub(crate) fn coerce_literal(
     field: &Field,
     column: &str,
 ) -> Result<Scalar, QueryError> {
+    // A quoted string compared with a date or timestamp column is read as one,
+    // so `WHERE day > '2026-01-01'` works without a typed literal.
+    if let Scalar::Str(text) = &value {
+        let parsed = match field.data_type {
+            DataType::Date => crate::temporal::parse_date(text).map(Scalar::Date),
+            DataType::Timestamp => crate::temporal::parse_timestamp(text).map(Scalar::Timestamp),
+            _ => None,
+        };
+        if let Some(v) = parsed {
+            return Ok(v);
+        }
+        if matches!(field.data_type, DataType::Date | DataType::Timestamp) {
+            return Err(QueryError::TypeMismatch {
+                column: column.to_string(),
+                expected: field.data_type.name(),
+                actual: "str",
+                context: format!(
+                    "'{text}' is not a valid {} for column '{column}'; use {}",
+                    field.data_type.name(),
+                    if field.data_type == DataType::Date {
+                        "YYYY-MM-DD"
+                    } else {
+                        "YYYY-MM-DD HH:MM:SS"
+                    }
+                ),
+            });
+        }
+    }
     let numeric_column = matches!(
         field.data_type,
         DataType::Int32 | DataType::Int64 | DataType::Float64
@@ -126,18 +154,32 @@ impl<'a> QueryBuilder<'a> {
         let idx = self.table.column_index(column)?;
         let field = &self.table.schema().fields[idx];
 
-        if !matches!(value, Scalar::Null) && coerce_literal(value.clone(), field, column).is_err() {
-            let field_type = field.data_type.name();
-            return Err(QueryError::TypeMismatch {
-                column: column.to_string(),
-                expected: field_type,
-                actual: value.type_name(),
-                context: format!(
-                    "Cannot compare '{column}' ({field_type}) with a value of {} type",
-                    value.type_name()
-                ),
-            });
-        }
+        let value = if matches!(value, Scalar::Null) {
+            value
+        } else {
+            match coerce_literal(value.clone(), field, column) {
+                Ok(v) => v,
+                // A string that is not a valid date or timestamp gets its own message.
+                Err(e)
+                    if matches!(field.data_type, DataType::Date | DataType::Timestamp)
+                        && matches!(value, Scalar::Str(_)) =>
+                {
+                    return Err(e);
+                }
+                Err(_) => {
+                    let field_type = field.data_type.name();
+                    return Err(QueryError::TypeMismatch {
+                        column: column.to_string(),
+                        expected: field_type,
+                        actual: value.type_name(),
+                        context: format!(
+                            "Cannot compare '{column}' ({field_type}) with a value of {} type",
+                            value.type_name()
+                        ),
+                    });
+                }
+            }
+        };
 
         let eng_op = to_engine_op(op).ok_or_else(|| QueryError::UnsupportedOperation {
             message: format!(
@@ -209,8 +251,8 @@ impl<'a> QueryBuilder<'a> {
             self.table.batches().to_vec(),
         ));
 
-        for predicate in self.predicates {
-            plan = Arc::new(FilterExec::new(plan, predicate));
+        if !self.predicates.is_empty() {
+            plan = Arc::new(FilterExec::new_all(plan, self.predicates));
         }
 
         if !self.group_by.is_empty() || !self.aggregates.is_empty() {
@@ -265,13 +307,16 @@ impl<'a> QueryBuilder<'a> {
             // The order column must be resolved against the current output schema.
             let schema = plan.schema();
             if let Some(idx) = schema.index_of(col) {
-                plan = Arc::new(SortExec::new(
-                    plan,
-                    vec![SortExpr {
-                        column: idx,
-                        desc: *desc,
-                    }],
-                ));
+                plan = Arc::new(
+                    SortExec::new(
+                        plan,
+                        vec![SortExpr {
+                            column: idx,
+                            desc: *desc,
+                        }],
+                    )
+                    .with_keep(self.limit),
+                );
             } else {
                 return Err(QueryError::MissingColumn {
                     column: col.clone(),

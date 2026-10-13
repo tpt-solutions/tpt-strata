@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::array::{ArrayRef, BoolArray, F64Array, I64Array, StrArray};
+use crate::array::{ArrayRef, BoolArray, F64Array, I32Array, I64Array, StrArray};
 use crate::batch::Batch;
 use crate::error::QueryError;
 use crate::format::Table;
@@ -347,6 +347,24 @@ pub fn parse_json(text: &str) -> Result<Table, QueryError> {
 
 fn array_for(dt: DataType, column: &[Option<&Value>]) -> ArrayRef {
     match dt {
+        DataType::Date => ArrayRef::Date(I32Array::from_nulls(
+            column
+                .iter()
+                .map(|c| match c {
+                    Some(Value::Str(s)) => crate::temporal::parse_date(s),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        DataType::Timestamp => ArrayRef::Timestamp(I64Array::from_nulls(
+            column
+                .iter()
+                .map(|c| match c {
+                    Some(Value::Str(s)) => crate::temporal::parse_timestamp(s),
+                    _ => None,
+                })
+                .collect(),
+        )),
         DataType::Boolean => ArrayRef::Boolean(BoolArray::from_nulls(
             column
                 .iter()
@@ -375,7 +393,10 @@ fn array_for(dt: DataType, column: &[Option<&Value>]) -> ArrayRef {
                 .collect(),
         )),
         DataType::Utf8 | DataType::Int32 => ArrayRef::Utf8(StrArray::from_nulls(
-            column.iter().map(|c| c.and_then(scalar_text)).collect(),
+            column
+                .iter()
+                .map(|c| c.and_then(scalar_text).map(std::sync::Arc::<str>::from))
+                .collect(),
         )),
     }
 }
