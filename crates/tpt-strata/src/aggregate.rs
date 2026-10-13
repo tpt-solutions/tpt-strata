@@ -479,12 +479,12 @@ impl AggregateExec {
 
 /// Rows per unit of aggregation work. Segments are the unit that threads
 /// share, so a large batch splits across them.
-const SEGMENT_ROWS: usize = 64 * 1024;
+pub(crate) const SEGMENT_ROWS: usize = 64 * 1024;
 
 /// `(batch, start, end)`: rows `start..end` of batch `batch`, in input order.
-type Segment = (usize, usize, usize);
+pub(crate) type Segment = (usize, usize, usize);
 
-fn segments(batches: &[BatchRef]) -> Vec<Segment> {
+pub(crate) fn segments(batches: &[BatchRef]) -> Vec<Segment> {
     let mut segs = Vec::new();
     for (bi, batch) in batches.iter().enumerate() {
         let rows = batch.row_count();

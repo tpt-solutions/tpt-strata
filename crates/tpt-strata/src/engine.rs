@@ -8,6 +8,7 @@ use crate::error::QueryError;
 use crate::schema::{DataType, Field, Schema};
 use crate::types::{numeric_cmp, Scalar};
 
+use crate::aggregate::{segments, Segment};
 pub use crate::aggregate::{AggFunc, Aggregate, AggregateExec};
 use crate::key::{key_at, FastMap, KeyPart};
 
@@ -736,6 +737,127 @@ impl JoinExec {
     }
 }
 
+/// The result of probing some left segments: output positions in left order,
+/// and which right rows found a partner.
+struct Probe {
+    left_pos: Vec<u64>,
+    right_pos: Vec<u64>,
+    right_matched: Vec<Vec<bool>>,
+}
+
+/// Probe the left rows in `segs` against the right-side `index`.
+fn probe_segments(
+    segs: &[Segment],
+    left_batches: &[BatchRef],
+    left_key: usize,
+    index: &FastMap<KeyPart<'_>, Vec<(usize, usize)>>,
+    right_rows: &[usize],
+    keeps_left: bool,
+) -> Probe {
+    let mut p = Probe {
+        left_pos: Vec::new(),
+        right_pos: Vec::new(),
+        right_matched: right_rows.iter().map(|&n| vec![false; n]).collect(),
+    };
+    for &(lbi, start, end) in segs {
+        let lb = &left_batches[lbi];
+        p.left_pos.reserve(end - start);
+        p.right_pos.reserve(end - start);
+        for row in start..end {
+            let key = key_at(&lb.columns[left_key], row);
+            let hits = if key == KeyPart::Null {
+                None
+            } else {
+                index.get(&key)
+            };
+            match hits {
+                Some(hits) if !hits.is_empty() => {
+                    for &(rbi, rrow) in hits {
+                        p.right_matched[rbi][rrow] = true;
+                        p.left_pos.push(pack(lbi, row));
+                        p.right_pos.push(pack(rbi, rrow));
+                    }
+                }
+                _ if keeps_left => {
+                    p.left_pos.push(pack(lbi, row));
+                    p.right_pos.push(NO_ROW);
+                }
+                _ => {}
+            }
+        }
+    }
+    p
+}
+
+/// Probe all left segments. With the `parallel` feature, contiguous runs of
+/// segments are probed on worker threads and merged in order, so the output
+/// matches a single pass.
+fn probe_all(
+    left_batches: &[BatchRef],
+    left_key: usize,
+    index: &FastMap<KeyPart<'_>, Vec<(usize, usize)>>,
+    right_rows: &[usize],
+    keeps_left: bool,
+) -> Probe {
+    let segs = segments(left_batches);
+    #[cfg(feature = "parallel")]
+    {
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(segs.len());
+        if threads > 1 {
+            let per = segs.len().div_ceil(threads);
+            let parts: Vec<Probe> = std::thread::scope(|scope| {
+                let workers: Vec<_> = segs
+                    .chunks(per)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            probe_segments(
+                                chunk,
+                                left_batches,
+                                left_key,
+                                index,
+                                right_rows,
+                                keeps_left,
+                            )
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                    .collect()
+            });
+            return merge_probes(parts);
+        }
+    }
+    probe_segments(&segs, left_batches, left_key, index, right_rows, keeps_left)
+}
+
+/// Concatenate probes in order, and OR their right-match flags.
+#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+fn merge_probes(parts: Vec<Probe>) -> Probe {
+    let mut merged = Probe {
+        left_pos: Vec::new(),
+        right_pos: Vec::new(),
+        right_matched: Vec::new(),
+    };
+    for part in parts {
+        merged.left_pos.extend(part.left_pos);
+        merged.right_pos.extend(part.right_pos);
+        if merged.right_matched.is_empty() {
+            merged.right_matched = part.right_matched;
+        } else {
+            for (acc, mine) in merged.right_matched.iter_mut().zip(part.right_matched) {
+                for (a, m) in acc.iter_mut().zip(mine) {
+                    *a |= m;
+                }
+            }
+        }
+    }
+    merged
+}
+
 impl PhysicalPlan for JoinExec {
     fn schema(&self) -> &Schema {
         &self.schema
@@ -758,44 +880,19 @@ impl PhysicalPlan for JoinExec {
             }
         }
 
-        // Probe with the left side, collecting matched positions on both sides.
-        // A `None` position is a row with no match on that side (outer joins).
-        // `right_matched[bi][row]` records which right rows found a partner, so
-        // a RIGHT or FULL join can add the rest afterwards.
-        let mut right_matched: Vec<Vec<bool>> = right_batches
-            .iter()
-            .map(|b| vec![false; b.row_count()])
-            .collect();
-        // Sized for one output row per left row: exact for key joins, and a
-        // good start for the rest.
-        let mut left_pos: Vec<u64> =
-            Vec::with_capacity(left_batches.iter().map(|b| b.row_count()).sum());
-        let mut right_pos: Vec<u64> =
-            Vec::with_capacity(left_batches.iter().map(|b| b.row_count()).sum());
-        for (lbi, lb) in left_batches.iter().enumerate() {
-            for row in 0..lb.row_count() {
-                let key = key_at(&lb.columns[self.left_key], row);
-                let hits = if key == KeyPart::Null {
-                    None
-                } else {
-                    index.get(&key)
-                };
-                match hits {
-                    Some(hits) if !hits.is_empty() => {
-                        for &(rbi, rrow) in hits {
-                            right_matched[rbi][rrow] = true;
-                            left_pos.push(pack(lbi, row));
-                            right_pos.push(pack(rbi, rrow));
-                        }
-                    }
-                    _ if self.kind.keeps_left() => {
-                        left_pos.push(pack(lbi, row));
-                        right_pos.push(NO_ROW);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let right_rows: Vec<usize> = right_batches.iter().map(|b| b.row_count()).collect();
+        let probe = probe_all(
+            &left_batches,
+            self.left_key,
+            &index,
+            &right_rows,
+            self.kind.keeps_left(),
+        );
+        let Probe {
+            mut left_pos,
+            mut right_pos,
+            right_matched,
+        } = probe;
         if self.kind.keeps_right() {
             for (rbi, matched_rows) in right_matched.iter().enumerate() {
                 for (row, &matched) in matched_rows.iter().enumerate() {

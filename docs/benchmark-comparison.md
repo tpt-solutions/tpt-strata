@@ -280,3 +280,17 @@ pre-validity baseline.
 | Q1 group by + 3 aggregates | 27.3 ms | 25.7–29.2 ms | 24.0 ms |
 | Q2 filter + sort + limit | 14.8 ms | 13.6–15.1 ms | 13.4 ms |
 | Q3 join + group by | 52.6 ms | 65.3–65.5 ms | 43.7 ms |
+
+### Phase 15, parallel join probe (opt-in `parallel` feature)
+
+With `--features parallel`, the join probe runs on the same 64k-row segments as
+aggregation. Workers probe contiguous runs of segments, and their results merge
+in order, so the output is the same as the single pass. Q3 on the Parquet tables
+(one-thread default vs `parallel`, median of 5):
+
+| | Default (1 thread) | `parallel` |
+|---|---|---|
+| Q3 join + group by | 52.2 ms | 41.0 ms |
+| join, no output columns | 27.2 ms | 21.8 ms |
+
+The default build is unchanged in behaviour. Its timing is within the usual run-to-run spread.
