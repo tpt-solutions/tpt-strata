@@ -76,18 +76,22 @@ let result = ctx.run(
 )?;
 ```
 
-Supported SQL: `SELECT` (columns, `*`, `SUM`/`COUNT`/`MIN`/`MAX`/`AVG`,
-`AS` aliases, `DISTINCT`), `FROM`/`JOIN ... ON`, `WHERE` with `AND`,
-`BETWEEN`, `IS [NOT] NULL` and `[NOT] LIKE`, `GROUP BY`, `HAVING`, `ORDER BY`
-(several keys, aliases allowed), `LIMIT`, `OFFSET`. Keywords are
-case-insensitive; column names are case-sensitive.
+| Construct | Status |
+|---|---|
+| `SELECT` columns, `*`, `AS` aliases, `DISTINCT` | supported |
+| `SUM`, `COUNT` (incl. `COUNT(*)`), `MIN`, `MAX`, `AVG` | supported |
+| `FROM`, `[LEFT \| RIGHT \| FULL] JOIN ... ON a.x = b.y`, several joins in a chain | supported (equi-joins) |
+| `WHERE` / `HAVING` with `AND`, `OR`, and parentheses | supported |
+| `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, column-to-column comparisons | supported |
+| `NOT`, `IN (...)`, `BETWEEN`, `IS [NOT] NULL`, `[NOT] LIKE` (`%`, `_`) | supported |
+| `GROUP BY`, `HAVING`, `ORDER BY` (several keys, aliases), `LIMIT`, `OFFSET` | supported |
+| `CAST`, arithmetic, other functions | rejected, with a targeted message |
+| Subqueries, CTEs, window functions, `COUNT(DISTINCT ...)` | rejected |
 
-Anything outside that subset, such as `OR`, `IN`, parentheses, `LEFT`/`OUTER`
-joins, multiple joins, and column-to-column comparisons, is rejected with a
-targeted diagnostic naming the construct and pointing at
-[docs/v1.1-scope.md](docs/v1.1-scope.md). Those omissions are deliberate
-decisions for the v1.1 milestone, not accidents. The
-[FAQ](docs/faq.md) lists them all.
+Keywords are case-insensitive; column names are case-sensitive. A rejected
+construct gets a message that names it and points at
+[docs/v1.1-scope.md](docs/v1.1-scope.md). The
+[FAQ](docs/faq.md) explains the reasons.
 
 ## Reading Parquet files
 
@@ -107,7 +111,8 @@ decimals and `UINT64`, are rejected with a diagnostic naming the column. Read
 only the columns you need with `read_parquet_columns`. See the
 [crate README](crates/tpt-strata-parquet/README.md) for the full mapping.
 
-CSV needs no extra crate: `tpt_strata::csv::parse_csv` and `to_csv`.
+CSV and JSON need no extra crate: `tpt_strata::csv::parse_csv` and `to_csv`, and
+`tpt_strata::json::parse_json` (an array of flat objects, or one object per line).
 
 ## Command line
 
@@ -159,6 +164,8 @@ Full numbers, per-workload benchmarks, and side-by-side diagnostic wording:
   joins, paging, reading and writing files, and CI checks
 - [docs/faq.md](docs/faq.md) — what it is for, what it is not for, NULL and
   number semantics, and what is not supported yet
+- [docs/errors.md](docs/errors.md) — each error kind, a real message, and
+  what to change
 - [ARCHITECTURE.md](ARCHITECTURE.md) — crate boundaries, the format/engine
   split, and the bridge-isolation rule
 - [docs/v1.1-scope.md](docs/v1.1-scope.md) — deliberate v1.1 scope decisions

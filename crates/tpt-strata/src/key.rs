@@ -44,9 +44,7 @@ impl Ord for KeyPart<'_> {
             (KeyPart::Bool(a), KeyPart::Bool(b)) => a.cmp(b),
             (KeyPart::I32(a), KeyPart::I32(b)) => a.cmp(b),
             (KeyPart::I64(a), KeyPart::I64(b)) => a.cmp(b),
-            (KeyPart::F64(a), KeyPart::F64(b)) => {
-                f64::from_bits(*a).total_cmp(&f64::from_bits(*b))
-            }
+            (KeyPart::F64(a), KeyPart::F64(b)) => f64::from_bits(*a).total_cmp(&f64::from_bits(*b)),
             (KeyPart::Str(a), KeyPart::Str(b)) => a.cmp(b),
             // Different variants only occur when comparing across columns of
             // different types, which the planner rules out. Keep the order total.
@@ -97,3 +95,62 @@ pub fn key_at(col: &ArrayRef, row: usize) -> KeyPart<'_> {
         },
     }
 }
+
+/// A fast, non-cryptographic hasher for the engine's internal indexes.
+///
+/// The standard library's default hasher resists hash-flooding, which costs
+/// time on every short key. Keys here come from the engine's own input, not
+/// from an attacker, so this simple multiply-and-rotate hash is enough.
+#[derive(Default, Clone, Copy)]
+pub struct FastHasher {
+    hash: u64,
+}
+
+const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl FastHasher {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(SEED);
+    }
+}
+
+impl std::hash::Hasher for FastHasher {
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            let mut word = [0u8; 8];
+            word.copy_from_slice(chunk);
+            self.add(u64::from_le_bytes(word));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut word = [0u8; 8];
+            word[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(word));
+        }
+    }
+
+    fn write_u8(&mut self, i: u8) {
+        self.add(u64::from(i));
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+
+    fn write_i64(&mut self, i: i64) {
+        self.add(i as u64);
+    }
+
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+}
+
+/// A `HashMap` that uses [`FastHasher`].
+pub type FastMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FastHasher>>;

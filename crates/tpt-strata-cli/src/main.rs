@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use tpt_strata::csv::{parse_csv, to_csv};
 use tpt_strata::format::render_table;
+use tpt_strata::json::parse_json;
 use tpt_strata::sql::SqlContext;
 use tpt_strata::Table;
 
@@ -117,7 +118,7 @@ fn is_data_file(path: &str) -> bool {
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase())
             .as_deref(),
-        Some("csv" | "parquet" | "parq")
+        Some("csv" | "json" | "parquet" | "parq")
     )
 }
 
@@ -137,7 +138,7 @@ fn table_name(path: &str) -> String {
             }
         })
         .collect();
-    if name.chars().next().map_or(true, |c| c.is_ascii_digit()) {
+    if name.chars().next().is_none_or(|c| c.is_ascii_digit()) {
         name.insert_str(0, "t_");
     }
     name
@@ -149,7 +150,11 @@ fn load(path: &str) -> Result<Table, String> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if ext == "csv" {
+    if ext == "json" {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
+        parse_json(&text).map_err(|e| format!("{path}: {e}"))
+    } else if ext == "csv" {
         let text =
             std::fs::read_to_string(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
         parse_csv(&text).map_err(|e| format!("{path}: {e}"))

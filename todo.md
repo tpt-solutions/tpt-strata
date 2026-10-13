@@ -225,15 +225,14 @@ Status: the items below were first *decided* as v1.1 scope (recorded in
 **implemented** (`[x]`) or still **deferred** (`[ ]`, rejected with a targeted
 parser diagnostic). See Phase 13 for the implementation log.
 
-- [ ] `OR` in `WHERE` — deferred; needs a boolean expression tree
+- [x] `OR` in `WHERE` — done (Phase 14), with parentheses
 - [x] `IS NULL` / `IS NOT NULL` — implemented (Phase 13)
-- [ ] `IN (...)` — deferred; needs `OR`. `BETWEEN` is implemented (Phase 13)
-- [ ] Parentheses / operator precedence in `WHERE` — deferred with `OR`
+- [x] `IN (...)` — done (Phase 14). `BETWEEN` is implemented (Phase 13)
+- [x] Parentheses / operator precedence in `WHERE` — done (Phase 14)
 - [x] `LIKE` / `NOT LIKE`, `DISTINCT`, `HAVING` — implemented (Phase 13)
-- [ ] Multiple `JOIN`s per query; LEFT/OUTER join — deferred (single inner
-      equi-join only)
-- [ ] Column-to-column comparisons in `WHERE` — deferred (column-vs-literal
-      only)
+- [x] Multiple `JOIN`s per query; LEFT/OUTER join — done (Phase 14). `RIGHT`
+      and `FULL` joins are done too (Phase 14, after the review).
+- [x] Column-to-column comparisons in `WHERE` — done (Phase 14)
 
 ### Missing data types
 
@@ -283,15 +282,17 @@ made deliberately rather than by omission.
       for the SQL they plan to run; record the list in
       `docs/consumer-queries.md`. This is the demand gate every deferred
       feature below depends on.
-- [ ] Add Polars and DuckDB (`duckdb-rs`) to the Phase 0 comparison: same
+- [x] Add Polars and DuckDB (`duckdb-rs`) to the Phase 0 comparison (validation-memo.md, sections 7 and 8; sketches in `bench/phase0-polars` and `bench/phase0-duckdb`): same
       "point at data" case, same broken queries; record dependency count,
       debug and release compile time, and error text. Update
       `validation-memo.md` with a dated section.
-- [ ] Re-check the Phase 8 benchmark item: `docs/benchmarks.md` says no direct
+- [x] Re-check the Phase 8 benchmark item (done with DataFusion and DuckDB in
+      `docs/benchmark-comparison.md`; Polars is still open above): `docs/benchmarks.md` says no direct
       comparison exists, so the "compare vs. the incumbent" claim is not met.
       Either add a DataFusion (and ideally Polars) run on the same workloads,
       or reword the item to say it is not done.
-- [ ] Reconcile CAST: `validation-memo.md` says "add at the SQL layer," but
+- [x] Reconcile CAST (decision: stays deferred, recorded as a row in
+      `docs/v1.1-scope.md`; the memo's "add at the SQL layer" note is superseded): `validation-memo.md` says "add at the SQL layer," but
       `docs/v1.1-scope.md` does not list CAST. Add a row with a decision, or
       correct the memo.
 - [ ] Revisit the spec §3 thesis in writing: state the ergonomic win over
@@ -301,22 +302,24 @@ made deliberately rather than by omission.
 
 Start with the parser change, since the cheap predicates fit into it.
 
-- [ ] **OR and parentheses in WHERE.** Replace the flat AND list with an
-      expression tree and precedence (`AND` binds tighter than `OR`). This is
-      the prerequisite for everything below. Tests: precedence, nested parens,
-      mixed AND/OR, rejection of unbalanced parens with a named diagnostic.
+- [x] **OR and parentheses in WHERE.** Done with a boolean condition tree
+      (`AND` binds tighter than `OR`), used in `WHERE` and `HAVING`. Tests in
+      `tests/conditions.rs`: precedence, nested parentheses, NULL inside OR,
+      type mismatch in a nested condition.
 - [x] **IS NULL / IS NOT NULL.** Engine already has null-aware semantics; add
       a predicate variant. Tests: null vs. non-null rows, with and without
       GROUP BY. (Done; see Phase 13.)
-- [ ] **IN (...).** Still deferred: needs `OR`, which is not built. **BETWEEN**
-      is done (desugars to two range predicates; see Phase 13).
+- [x] **IN (...).** Done: an OR of equality comparisons, with NULL entries that
+      match nothing. **BETWEEN** is done too (two range predicates).
 - [x] **HAVING.** Apply the existing filter operator to aggregate output. HAVING
       on an aggregate that is not in SELECT is computed, not rejected. (Done.)
 - [x] **DISTINCT.** Implemented as GROUP BY over the projected columns. (Done.)
-- [ ] **Column-to-column comparisons in WHERE.** Not started.
-- [ ] **LEFT / OUTER JOIN and multiple JOINs.** Engine change: join operator
-      and plan composition. Gate on 11a consumer list; do not start without a
-      real query. Update ARCHITECTURE.md's materialization note when done.
+- [x] **Column-to-column comparisons in WHERE.** Done. Types must match, or
+      both be numeric.
+- [x] **LEFT / OUTER JOIN and multiple JOINs.** Done as equi-joins: a left join
+      keeps unmatched left rows with NULLs, and a chain of joins may refer to any
+      table joined before. `RIGHT` and `FULL` joins were added later (Phase 14). The
+      consumer-gate note above no longer applies: it was implemented on request.
 - [x] **LIKE.** Implemented with `%` and `_` only, as `LIKE` and `NOT LIKE`
       (added without a consumer gate, on request). Other constructs such as
       `ESCAPE` are not accepted. (Done.)
@@ -330,12 +333,13 @@ Start with the parser change, since the cheap predicates fit into it.
 
 ### 11d. Documentation and guardrails
 
-- [ ] Update `docs/v1.1-scope.md` with a changelog entry for each item moved
+
+- [x] Update `docs/v1.1-scope.md` with a changelog entry for each item moved
       out of "deferred."
-- [ ] Update the README "Constructs outside the subset" section as each
+- [x] Update the README "Constructs outside the subset" section as each
       construct lands; keep the diagnostic tests in
       `tests/diagnostics.rs` in sync.
-- [ ] Add a SQL support matrix to README.md (supported / deferred / rejected)
+- [x] Add a SQL support matrix to README.md (supported / deferred / rejected)
       so users can see the subset without reading the grammar.
 
 **Milestone:** The comparison claims are backed by data, and the SQL subset
@@ -355,36 +359,40 @@ recorded decision with a named consumer gate.
 > `tpt-simd-vector`, but it is not published and its crates depend on each
 > other by path. It is not added to core. Evaluate it again (see 12e) once
 > it is published and a kernel is measured to need explicit lanes.
+>
+> Status (Phase 14): 12a–12d and the 12f re-run are done. The profiler run in 12f
+> is open because no sampling profiler is installed here. 12e waits for
+> publication.
 
 ### 12a. Aggregate (GROUP BY)
 
-- [ ] Replace per-row `Vec<Scalar>` group keys with borrowed typed key parts
+- [x] Replace per-row `Vec<Scalar>` group keys with borrowed typed key parts
       (`KeyPart<'a>`): no allocation per row, `&str` keys borrowed from the
       input batch.
-- [ ] Replace `Box<dyn Accumulator>` per group with typed state vectors
+- [x] Replace `Box<dyn Accumulator>` per group with typed state vectors
       indexed by group id (`AggState`), updated by a loop over typed arrays.
-- [ ] Keep semantics: SUM/AVG skip NULL and return NULL for no input; COUNT(*)
+- [x] Keep semantics: SUM/AVG skip NULL and return NULL for no input; COUNT(*)
       counts all rows; MIN/MAX skip NULL; global aggregate returns one row
       over zero rows.
-- [ ] Group output order is first-seen (was HashMap order). Check tests.
+- [x] Group output order is first-seen (was HashMap order). Check tests.
 
 ### 12b. Filter
 
-- [ ] Evaluate predicates on typed slices, producing a selection vector.
+- [x] Evaluate predicates on typed slices, producing a selection vector.
       Typed fast path for same-type comparisons; generic fallback for mixed
       types so behaviour is unchanged.
 
 ### 12c. Sort and join
 
-- [ ] Sort: sort an index vector with a typed comparator over the merged key
+- [x] Sort: sort an index vector with a typed comparator over the merged key
       columns, then `take` once per column (no per-value `Scalar` clones).
       Keep NULLS FIRST ascending.
-- [ ] Join: build the hash index on typed `KeyPart`s instead of `Scalar`
+- [x] Join: build the hash index on typed `KeyPart`s instead of `Scalar`
       (removes the per-probe-row `String` clone). Keep NULL keys excluded.
 
 ### 12d. Data movement
 
-- [ ] Measure how much time `DataSource::execute` and SQL bind spend cloning
+- [x] Measure how much time `DataSource::execute` and SQL bind spend cloning
       batches (`batches().to_vec()`, `Vec<Batch>::clone`). If significant,
       share column storage behind `Arc`.
 
@@ -438,11 +446,10 @@ still holds, and every number in docs/benchmarks.md is backed by a re-run.
 - [x] Parquet errors are `Io` and `Import`, with `source()` for I/O.
 - [x] `print_table` measures width in characters, shows the header for zero
       rows, and escapes newlines.
-- [ ] `LIMIT` still reads its whole input; there is no upstream short-circuit.
-- [ ] The literal `-9223372036854775808` still fails, because the minus sign is
-      lexed separately.
-- [ ] `Scalar` display still prints `100.0` as `100`.
-- [ ] `ArrayRef::take` still panics on an out-of-range index.
+- [x] `LIMIT` short-circuit: operators now stream through `PhysicalPlan::open()`, so `LIMIT` stops pulling input once it has enough rows (`tests/streaming.rs`).
+- [x] The literal `-9223372036854775808` is accepted (Phase 14).
+- [x] `Scalar` display prints whole floats with a decimal point, `100.0` (Phase 14).
+- [x] `ArrayRef::take` returns NULL for an out-of-range index (Phase 14).
 
 ### Phase B — release readiness (nothing published)
 
@@ -453,11 +460,11 @@ still holds, and every number in docs/benchmarks.md is backed by a re-run.
 - [x] `release-check.yml`: runs on `v*` tags or by hand, and never uploads.
 - [x] Dependabot, issue and pull request templates, CODEOWNERS, a Code of Conduct,
       and an expanded CONTRIBUTING.
-- [ ] CODEOWNERS names `@PhillipC05` as a placeholder. Replace it with the
-      real maintainers.
-- [ ] MSRV 1.75 is not verified here: no 1.75 toolchain is installed locally,
-      and arrow/parquet 55 may need a newer compiler. The CI `msrv` job is the check.
-- [ ] Exact version pins (`=1.0.1`) are unchanged. Revisit when the publish
+- [x] CODEOWNERS team name: DROPPED (decision, 2026-10-13, per owner). Not pursued.
+- [x] MSRV checked per crate (Phase 14): core and serde build and test on 1.75.
+      Parquet, CLI and WASM build on 1.85, and the whole workspace needs 1.85.
+      CI runs both checks.
+- [x] Exact version pins (`=1.0.1`): DECIDED, keep them. Revisit only when the publish
       order is settled.
 - [ ] No tags, crates.io entries, or docs.rs builds exist yet.
 
@@ -472,13 +479,12 @@ still holds, and every number in docs/benchmarks.md is backed by a re-run.
 - [x] `SqlContext::explain` prints the physical plan.
 - [x] v1.1 SQL: `IS [NOT] NULL`, `BETWEEN`, `[NOT] LIKE`, `DISTINCT`, `HAVING`,
       `OFFSET`, and several `ORDER BY` keys.
-- [ ] Still deferred: `OR`, `IN`, parentheses in `WHERE`, `LEFT`/multiple joins,
-      column-to-column comparisons, `CAST`, and arithmetic in `SELECT`.
-- [ ] Phase 12 performance items (typed group keys, typed filter kernels,
-      top-k sort, typed join keys) are not done. The measured gain came from
-      shared batches and typed gathers, which is part of 12c and 12d.
-- [ ] Parquet row-group streaming is not done. The whole file is read into memory.
-- [ ] JSON ingest is not done.
+- [ ] Still deferred: `CAST` and arithmetic in `SELECT`. `OR`, `IN`, parentheses,
+      `LEFT`/multiple joins and column comparisons are done (Phase 14).
+- [x] Phase 12 typed hot paths (12a–12d) are done (Phase 14). Only the
+      profiler re-check in 12f is open.
+- [ ] Parquet row-group streaming: DECIDED, deferred (2026-10-13). The whole file is read into memory. A streaming reader would be new public surface on `tpt-strata-parquet`, and no consumer has shown a table that does not fit. Gate: a consumer query over a file larger than memory.
+- [x] JSON ingest is done (`tpt_strata::json::parse_json`, Phase 14).
 
 ### Phase D — innovation (a small set)
 
@@ -488,7 +494,7 @@ still holds, and every number in docs/benchmarks.md is backed by a re-run.
       with a Node smoke test. The page has not been opened in a browser.
 - [x] Python bindings (`tpt-strata-python`, built with maturin): 16 tests pass.
 - [x] Serde support (`tpt-strata-serde`): flat structs to tables and back.
-- [ ] Not started: a derive macro and per-error explanation pages.
+- [x] Derive macro: DROPPED (decision, 2026-10-13). `tpt-strata-serde` covers flat structs, and a derive needs a new proc-macro crate for little gain. Revisit only if a consumer asks. Per-error explanation pages are done (`docs/errors.md`).
 
 ### Phase E — examples and templates
 
@@ -500,7 +506,7 @@ still holds, and every number in docs/benchmarks.md is backed by a re-run.
 - [x] Comparison benchmark against DataFusion and DuckDB (`bench/compare`,
       results in `docs/benchmark-comparison.md`). tpt-strata is slower on these
       analytic queries; the write-up says by how much.
-- [ ] Not done: `docs/consumer-queries.md`, which needs the consumers' own queries.
+- [ ] `docs/consumer-queries.md`: the template is written. The repo holds no consumer queries (spec.txt gives use cases in prose only), so this stays open until the three teams send their SQL.
 
 ### Verification
 
@@ -509,3 +515,71 @@ still holds, and every number in docs/benchmarks.md is backed by a re-run.
   all pass.
 - `cargo bench -p tpt-strata --bench queries` was re-run. The figures are in
   docs/benchmarks.md, with the caveat that they are not a same-session comparison.
+
+## Phase 14 — Remaining-items pass (unreleased)
+
+> Work on the items still open after Phase 13. Nothing was tagged, published,
+> or uploaded. Items marked `[ ]` are still open, with the reason.
+
+### Phase 12 — typed hot paths
+
+- [x] 12a: group keys are borrowed typed keys (`KeyPart`), and each aggregate
+      keeps typed state indexed by group. Output is in first-seen order.
+- [x] 12b: filters on same-type columns compare typed keys. Other cases use the
+      general path. Floats keep the SQL NaN rules.
+- [x] 12c: sort and join use typed keys. NULL keys still never match in a join.
+- [x] 12d: columns are shared (`Arc`), so projecting copies no data. Joins read
+      only the columns the query names.
+- [x] 12f: the benchmark was re-run and recorded in `docs/benchmark-comparison.md`.
+- [ ] 12f: profile the group-by with a sampling profiler. No profiler is
+      installed here.
+- [ ] 12e: tpt-simd. Waits for publication.
+
+Single-thread results, 1,000,000 rows (first measurement → now): group by
+107 ms → 35 ms; filter, sort, limit 68 ms → 54 ms; join 269 ms → 104 ms.
+
+### SQL (Phase 10 and 11b)
+
+- [x] `OR` and parentheses in `WHERE` and `HAVING` (`tests/conditions.rs`).
+- [x] `IN (...)`.
+- [x] Column-to-column comparisons. Types must match, or both be numeric.
+- [x] `LEFT [OUTER] JOIN` and several joins in a chain (`tests/joins.rs`).
+- [x] `RIGHT` and `FULL` joins (`tests/joins.rs`). Unmatched rows of the other side
+      are kept with NULLs.
+- [x] `NOT`, `NOT IN`, `NOT BETWEEN` (`tests/conditions.rs`). `NOT` is pushed down
+      to the comparisons, so the NULL rows match SQL three-valued logic.
+- [x] SQL support matrix in the README and the constructs section updated.
+
+### Phase 13 leftovers
+
+- [x] `-9223372036854775808` literal.
+- [x] Whole floats print as `100.0`.
+- [x] `ArrayRef::take` returns NULL for an out-of-range index.
+- [x] JSON ingest (`tpt_strata::json::parse_json`). The CLI reads `.json`.
+- [x] `LIMIT` short-circuit (done 2026-10-13, see `engine::BatchStream`). Scan, filter, project and limit stream;
+      sort, join and aggregate still materialize, as they must.
+- [ ] Parquet row-group streaming: DECIDED, deferred (2026-10-13), same gate as above. The whole table is held in memory.
+
+### Phase 14 — other open items
+
+- [x] Phase D: derive macro DROPPED (decision, 2026-10-13); see Phase 13 D.
+- [x] Phase D: per-error explanation pages — `docs/errors.md`, one section per `kind()`.
+- [ ] Phase 11a: consumer queries. These need the consumers. The Polars
+      comparison is done (validation-memo.md, section 7).
+- [ ] Phase 12f profiler: blocked on elevation. `samply` is installed, but on
+      Windows it needs `xperf` from the Windows Performance Toolkit, which needs
+      an elevated install. From an elevated shell, run
+      `winget install -e --id Microsoft.WindowsADK --override "/quiet /features OptionId.WindowsPerformanceToolkit"`,
+      then `samply record --save-only -o profile.json.gz -- target/release/deps/queries-*.exe`.
+- [ ] Phase 11c: native Date and Timestamp types. Gated on a consumer schema.
+- [ ] Phase 9 and 12e: publishing, tags, and the tpt-simd evaluation. Out of
+      scope until a release is decided.
+
+### Verification
+
+- `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets
+  --all-features -- -D warnings` pass.
+- `cargo test --workspace`: 22 suites, all passing.
+- MSRV: `tpt-strata` and `tpt-strata-serde` build and test on 1.75.
+  `tpt-strata-parquet`, `tpt-strata-cli` and `tpt-strata-wasm` build on 1.85,
+  and so does the whole workspace.

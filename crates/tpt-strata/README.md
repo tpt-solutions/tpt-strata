@@ -185,14 +185,17 @@ The supported grammar:
 
 ```text
 SELECT [DISTINCT] <column | agg(col) | agg(*) | *> [AS alias] [, ...]
-  FROM <table> [JOIN <table> ON left.col = right.col]
-  [WHERE pred [AND pred ...]]
+  FROM <table> [[LEFT | RIGHT | FULL] [OUTER] JOIN <table> ON left.col = right.col]...
+  [WHERE cond]
   [GROUP BY col [, ...]]
-  [HAVING pred [AND pred ...]]
+  [HAVING cond]
   [ORDER BY col-or-alias [ASC | DESC] [, ...]]
   [LIMIT n] [OFFSET n] [;]
 
-pred := col op literal | col BETWEEN literal AND literal
+cond := primary [AND | OR primary ...]     -- AND binds tighter than OR
+primary := NOT primary | ( cond ) | pred
+pred := col op literal | col op col
+      | col [NOT] IN (literal, ...) | col [NOT] BETWEEN literal AND literal
       | col IS [NOT] NULL | col [NOT] LIKE 'pattern'
 ```
 
@@ -214,9 +217,6 @@ pred := col op literal | col BETWEEN literal AND literal
 These are rejected on purpose, each with a targeted message that names the
 construct and points at [`docs/v1.1-scope.md`](https://github.com/tpt-solutions/tpt-strata/blob/master/docs/v1.1-scope.md):
 
-- `OR`, `IN (...)`, and parentheses in `WHERE`
-- `LEFT` / `OUTER` joins, and more than one join per query
-- Column-to-column comparisons in `WHERE`
 - `CAST`, `COUNT(DISTINCT ...)`, and arithmetic or functions other than the
   aggregates
 
@@ -280,8 +280,8 @@ want to compose plans yourself.
 - **Five native types.** Anything else needs converting before it reaches the
   engine. Use [`tpt-strata-parquet`](https://crates.io/crates/tpt-strata-parquet)
   for Parquet input.
-- **Single-table queries plus one inner equi-join.** Multi-join and outer joins
-  are deferred to v1.1.
+- **Equi-joins only.** Inner, LEFT, RIGHT and FULL joins, chained, on one key
+  column per side. Non-equality join conditions are not supported.
 - **No query optimizer.** Plans run as written.
 
 ## Examples

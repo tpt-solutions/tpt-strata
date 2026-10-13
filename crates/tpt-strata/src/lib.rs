@@ -24,12 +24,15 @@
 //! print_table(&result);
 //! ```
 
+pub mod aggregate;
 pub mod array;
 pub mod batch;
 pub mod csv;
 pub mod engine;
 pub mod error;
 pub mod format;
+pub mod json;
+pub mod key;
 pub mod query;
 pub mod schema;
 pub mod sql;

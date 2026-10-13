@@ -40,8 +40,9 @@ number.
 ## What SQL is supported?
 
 `SELECT` with columns, `*`, and `SUM`, `COUNT`, `MIN`, `MAX`, `AVG` (including
-`COUNT(*)`). `FROM` with one inner equi-join. `WHERE` with `AND`, comparisons,
-`BETWEEN`, `IS [NOT] NULL`, `[NOT] LIKE`. `GROUP BY`, `HAVING`, `DISTINCT`,
+`COUNT(*)`). `FROM` with equi-joins (inner, `LEFT`, `RIGHT`, `FULL`, chained).
+`WHERE` with `AND`, `OR`, `NOT`, parentheses, comparisons, `IN`, `BETWEEN`,
+`IS [NOT] NULL`, `[NOT] LIKE`. `GROUP BY`, `HAVING`, `DISTINCT`,
 `ORDER BY` (several keys, aliases allowed), `LIMIT`, `OFFSET`. Comments with
 `--` and `/* */`. Full list and the rejected constructs:
 [v1.1 scope](v1.1-scope.md).
@@ -49,9 +50,8 @@ number.
 ## What SQL is not supported?
 
 Expressions in SELECT (`a + b`, `CASE`, functions other than the aggregates),
-`OR`, `IN`, parentheses in `WHERE`, `LEFT` and `OUTER` joins, more than one
-join, subqueries, `CTE`s, window functions, `CAST`, `COUNT(DISTINCT ...)`,
-column-to-column comparisons, and table aliases. Each rejected construct gets a
+subqueries, `CTE`s, window functions, `CAST`, `COUNT(DISTINCT ...)`,
+non-equality joins, and table aliases. Each rejected construct gets a
 diagnostic that says so.
 
 ## How are NULLs handled?

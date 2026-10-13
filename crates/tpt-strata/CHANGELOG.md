@@ -10,8 +10,26 @@ this crate follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- SQL: `NOT`, `NOT IN` and `NOT BETWEEN`. `NOT` is pushed down to the
+  comparisons, so NULL rows behave as in SQL.
+- SQL: `RIGHT` and `FULL` joins (with optional `OUTER`).
+- `JoinKind` and `JoinExec::try_new_join`. `try_new_kind(bool)` still works and
+  maps to `Left` or `Inner`.
+- `docs/errors.md`: one section per error `kind()`, with real messages.
+
 ### Changed
 
+- `JoinExec` plans print as `Left HashJoin`, `Right HashJoin` or `Full HashJoin`
+  instead of `HashJoin` for outer joins.
+
+- **Behavior change:** grouped results come out in first-seen order, not sorted
+  by key. A whole float prints as `100.0`. `-0.0` sorts equal to `0.0`.
+- `Batch::columns` holds shared columns (`Arc<ArrayRef>`). `Batch::new_shared`
+  builds a batch from columns without copying them. Existing constructors are
+  unchanged.
+- `ArrayRef::take` returns NULL for an out-of-range index.
 - **Behavior change:** `AS` aliases name output columns, and work in `ORDER BY`
   and `HAVING`. They used to be parsed and ignored.
 - **Behavior change:** `SUM` over an integer column returns `Int64` and fails on
@@ -27,6 +45,12 @@ this crate follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- SQL: `OR`, parentheses, `IN (...)`, `LEFT [OUTER] JOIN`, several joins, and
+  column-to-column comparisons. `-9223372036854775808` is a valid literal.
+- `json` module: `parse_json` reads arrays of flat objects, a single object, or
+  one object per line, with the same type inference as `csv`.
+- `key` module: borrowed typed keys (`KeyPart`) and a fast hasher used for the
+  engine's internal indexes. `aggregate` module: typed grouped aggregation.
 - SQL: `IS [NOT] NULL`, `BETWEEN`, `[NOT] LIKE`, `DISTINCT`, `HAVING`, `OFFSET`,
   several `ORDER BY` keys, `--` and `/* */` comments, exponent literals, and
   doubled quotes in quoted identifiers.

@@ -13,6 +13,15 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 
 ### Changed
 
+- **Behavior change:** grouped results come out in first-seen order. They were
+  sorted by group key before. Add `ORDER BY` when the order matters.
+- **Behavior change:** a whole float prints with a decimal point (`100.0`), so
+  it does not look like an integer.
+- **Behavior change:** `-0.0` and `0.0` sort as equal. They used to sort with
+  `-0.0` first. `NaN` still sorts last.
+- Per-crate minimum Rust versions are recorded in each `Cargo.toml`. The core
+  and serde crates are verified on 1.75. The Parquet, CLI and WASM crates are
+  verified on 1.85. The workspace as a whole needs 1.85.
 - **Behavior change:** `AS` aliases now name output columns. They were parsed
   and ignored before, so `SUM(x) AS total` came back as `SUM(x)`.
 - **Behavior change:** `SUM` over an integer column returns `Int64` (it was
@@ -50,6 +59,9 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 - The "Did you mean" suggestion is separated from the column list by a full stop.
 - `Array::get` and `is_null` return null for an out-of-range index instead of
   panicking.
+- `-9223372036854775808` is accepted as a literal. `9223372036854775808` on its
+  own is still an error.
+- `ArrayRef::take` returns NULL for an out-of-range index instead of panicking.
 - `ORDER BY` no longer mishandles `NULL`: nulls now sort **first** ascending
   (`NULLS FIRST`) and last descending, instead of landing in an arbitrary
   position via `scalar_cmp`'s equal-for-incomparable fallback. New
@@ -67,6 +79,17 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 
 ### Added
 
+- SQL: `OR` and parentheses in `WHERE` and `HAVING`; `IN (...)`; `LEFT [OUTER]
+  JOIN`; several joins in one query (each `ON` clause may refer to any table
+  joined before it); column-to-column comparisons. `RIGHT`/`FULL` joins and
+  `NOT` are still rejected with a targeted message.
+- `tpt_strata::json::parse_json`: JSON arrays of flat objects, a single object,
+  or newline-delimited objects. The CLI reads `.json` files.
+- Columns are shared (`Arc`), so projecting a column copies no data. Joins read
+  only the columns the query uses.
+- Typed execution: grouping, aggregation, filtering, sorting and joins use
+  borrowed typed keys with no per-row `Scalar`. A non-cryptographic hasher is
+  used for the internal indexes.
 - `tpt-strata-serde`: convert flat structs to a table (`to_table`) and read
   query results back into structs (`from_table`). Not published.
 - `tpt-strata-wasm` and a browser playground in `playground/`: the engine

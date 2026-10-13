@@ -12,10 +12,12 @@ pub type BatchRef = Arc<Batch>;
 /// A chunk of columnar data: a schema plus one array per field.
 ///
 /// Batches are the unit of streaming execution through the physical engine.
+/// Each column is shared (`Arc`), so projecting or re-using a column across
+/// batches does not copy its values.
 #[derive(Debug, Clone)]
 pub struct Batch {
     pub schema: Arc<Schema>,
-    pub columns: Vec<ArrayRef>,
+    pub columns: Vec<Arc<ArrayRef>>,
 }
 
 impl Batch {
@@ -53,12 +55,20 @@ impl Batch {
                 });
             }
         }
-        Ok(Self { schema, columns })
+        Ok(Self::new_unchecked(schema, columns))
     }
 
     /// Create a batch without validation, for callers that already hold
     /// type-correct arrays (e.g. the Parquet import bridge).
     pub fn new_unchecked(schema: Arc<Schema>, columns: Vec<ArrayRef>) -> Self {
+        Self {
+            schema,
+            columns: columns.into_iter().map(Arc::new).collect(),
+        }
+    }
+
+    /// Create a batch from columns that are already shared. No data is copied.
+    pub fn new_shared(schema: Arc<Schema>, columns: Vec<Arc<ArrayRef>>) -> Self {
         Self { schema, columns }
     }
 

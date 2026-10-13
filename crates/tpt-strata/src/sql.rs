@@ -5,21 +5,29 @@
 //!
 //! ```text
 //! SELECT [DISTINCT] <column | agg(col) | agg(*) | *> [AS alias] [, ...]
-//!   FROM <table> [JOIN <table> ON left.col = right.col]
-//!   [WHERE pred [AND pred ...]]
+//!   FROM <table> [[LEFT | RIGHT | FULL] [OUTER] JOIN <table> ON left.col = right.col]...
+//!   [WHERE cond]
 //!   [GROUP BY col [, ...]]
-//!   [HAVING pred [AND pred ...]]
+//!   [HAVING cond]
 //!   [ORDER BY col-or-alias [ASC | DESC] [, ...]]
 //!   [LIMIT n] [OFFSET n] [;]
 //!
-//! pred := col op literal | col BETWEEN literal AND literal
-//!       | col IS [NOT] NULL | col [NOT] LIKE 'pattern'
+//! cond := and-cond [OR and-cond ...]
+//! and-cond := primary [AND primary ...]
+//! primary := NOT primary | ( cond ) | comparison
+//! comparison := operand op literal | operand op operand
+//!             | operand [NOT] IN (literal [, ...]) | operand [NOT] BETWEEN literal AND literal
+//!             | operand IS [NOT] NULL | operand [NOT] LIKE 'pattern'
 //! ```
 //!
-//! Anything outside this subset (e.g. `OR`, `IN`, parentheses, `LEFT`/`OUTER`
-//! joins, multiple joins, column-to-column comparisons, `CAST`) is rejected
-//! with a targeted diagnostic pointing at `docs/v1.1-scope.md`. The omissions
-//! are decisions, not accidents.
+//! `AND` binds tighter than `OR`. Parentheses override that. `NOT` is pushed
+//! down to the comparisons, so `NOT (a AND b)` becomes `NOT a OR NOT b`. A
+//! comparison involving NULL is unknown and its negation is unknown too, so
+//! unknown rows are filtered out either way, as in SQL.
+//!
+//! Anything outside this subset (e.g. `CAST`, arithmetic, subqueries) is
+//! rejected with a targeted diagnostic pointing at `docs/v1.1-scope.md`. The
+//! omissions are decisions, not accidents.
 //!
 //! Supported aggregate functions: `SUM`, `COUNT`, `MIN`, `MAX`, `AVG`,
 //! including `COUNT(*)`. Comparison ops: `=`, `!=`, `<>`, `>`, `>=`, `<`,
@@ -29,8 +37,9 @@
 use std::sync::Arc;
 
 use crate::engine::{
-    AggFunc as EngAggFunc, Aggregate, AggregateExec, Comparison, DataSource, Expr, FilterExec,
-    JoinExec, LimitExec, PhysicalPlan, Predicate, ProjectExec, SortExec, SortExpr,
+    AggFunc as EngAggFunc, Aggregate, AggregateExec, Comparison, CondFilterExec, Condition,
+    DataSource, Expr, FilterExec, JoinExec, JoinKind, LimitExec, PhysicalPlan, Predicate,
+    ProjectExec, SortExec, SortExpr,
 };
 use crate::error::QueryError;
 use crate::format::Table;
@@ -84,10 +93,77 @@ struct Pred {
     value: Scalar,
 }
 
+/// A boolean condition: a comparison with a literal, a comparison between two
+/// operands, or an AND or OR of conditions.
+#[derive(Debug, Clone, PartialEq)]
+enum Cond {
+    Leaf(Pred),
+    ColCmp {
+        left: Operand,
+        op: Comparison,
+        right: Operand,
+    },
+    And(Vec<Cond>),
+    Or(Vec<Cond>),
+}
+
+/// Every operand a condition refers to, in source order.
+fn cond_operands(c: &Cond, out: &mut Vec<Operand>) {
+    match c {
+        Cond::Leaf(p) => out.push(p.target.clone()),
+        Cond::ColCmp { left, right, .. } => {
+            out.push(left.clone());
+            out.push(right.clone());
+        }
+        Cond::And(parts) | Cond::Or(parts) => {
+            for p in parts {
+                cond_operands(p, out);
+            }
+        }
+    }
+}
+
+/// Negate a condition by pushing `NOT` down to the comparisons. Every
+/// comparison has an exact opposite that is also NULL when an input is NULL,
+/// so filtering with NULL-as-false gives the same rows as SQL three-valued
+/// logic. AND and OR swap by De Morgan's laws.
+fn negate_cond(c: Cond) -> Cond {
+    match c {
+        Cond::Leaf(mut p) => {
+            p.op = negate_comparison(p.op);
+            Cond::Leaf(p)
+        }
+        Cond::ColCmp { left, op, right } => Cond::ColCmp {
+            left,
+            op: negate_comparison(op),
+            right,
+        },
+        Cond::And(parts) => Cond::Or(parts.into_iter().map(negate_cond).collect()),
+        Cond::Or(parts) => Cond::And(parts.into_iter().map(negate_cond).collect()),
+    }
+}
+
+fn negate_comparison(op: Comparison) -> Comparison {
+    match op {
+        Comparison::Eq => Comparison::NotEq,
+        Comparison::NotEq => Comparison::Eq,
+        Comparison::Gt => Comparison::Lte,
+        Comparison::Gte => Comparison::Lt,
+        Comparison::Lt => Comparison::Gte,
+        Comparison::Lte => Comparison::Gt,
+        Comparison::IsNull => Comparison::IsNotNull,
+        Comparison::IsNotNull => Comparison::IsNull,
+        Comparison::Like => Comparison::NotLike,
+        Comparison::NotLike => Comparison::Like,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct JoinClause {
     right: String,
     on: (String, String),
+    /// Which unmatched rows are kept (`LEFT`, `RIGHT`, `FULL`, or inner).
+    kind: JoinKind,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,10 +171,10 @@ struct Select {
     distinct: bool,
     projections: Vec<ProjectionItem>,
     from: String,
-    join: Option<JoinClause>,
-    predicates: Vec<Pred>,
+    joins: Vec<JoinClause>,
+    filter: Option<Cond>,
     group_by: Vec<String>,
-    having: Vec<Pred>,
+    having: Option<Cond>,
     order_by: Vec<(Operand, bool)>,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -137,6 +213,8 @@ enum Tok {
     Ident(String),
     Number(f64),
     Int(i64),
+    /// The magnitude 2^63, which only `-9223372036854775808` can use.
+    MinMagnitude,
     StrLit(String),
     True,
     False,
@@ -187,6 +265,7 @@ impl Tok {
             Tok::Ident(s) => s.clone(),
             Tok::Number(n) => format!("{n}"),
             Tok::Int(n) => format!("{n}"),
+            Tok::MinMagnitude => "9223372036854775808".into(),
             Tok::StrLit(_) => "string literal".into(),
             Tok::True => "TRUE".into(),
             Tok::False => "FALSE".into(),
@@ -435,6 +514,9 @@ fn lex(input: &str) -> Result<(Vec<Tok>, Vec<usize>), QueryError> {
                         sql_err_at(input, start, format!("invalid number '{text}'"))
                     })?;
                     push(start, Tok::Number(n));
+                } else if text == "9223372036854775808" {
+                    // Only valid right after a minus sign (see parse_literal).
+                    push(start, Tok::MinMagnitude);
                 } else {
                     let n: i64 = text.parse().map_err(|_| {
                         sql_err_at(input, start, format!("integer out of range '{text}'"))
@@ -686,6 +768,10 @@ impl Parser {
         let tok = self.next();
         let value = match tok {
             Tok::Int(n) => Scalar::I64(if neg { -n } else { n }),
+            Tok::MinMagnitude if neg => Scalar::I64(i64::MIN),
+            Tok::MinMagnitude => {
+                return Err(self.perr("integer out of range '9223372036854775808'"));
+            }
             Tok::Number(n) => Scalar::F64(if neg { -n } else { n }),
             Tok::StrLit(s) => {
                 if neg {
@@ -721,42 +807,112 @@ impl Parser {
         Ok(value)
     }
 
-    /// Parse one predicate. `BETWEEN` expands to two predicates, so the result
-    /// is a list. `clause` is `WHERE` or `HAVING`.
-    fn parse_pred(&mut self, clause: &str) -> Result<Vec<Pred>, QueryError> {
+    /// Parse a condition for `clause` (`WHERE` or `HAVING`).
+    ///
+    /// Precedence, lowest first: `OR`, then `AND`, then a parenthesised
+    /// condition or one comparison. `NOT` is still outside the subset.
+    fn parse_cond(&mut self, clause: &str) -> Result<Cond, QueryError> {
+        let mut parts = vec![self.parse_and(clause)?];
+        while self.accept(Tok::Or) {
+            parts.push(self.parse_and(clause)?);
+        }
+        Ok(if parts.len() == 1 {
+            parts.remove(0)
+        } else {
+            Cond::Or(parts)
+        })
+    }
+
+    fn parse_and(&mut self, clause: &str) -> Result<Cond, QueryError> {
+        let mut parts = vec![self.parse_primary(clause)?];
+        while self.accept(Tok::And) {
+            parts.push(self.parse_primary(clause)?);
+        }
+        Ok(if parts.len() == 1 {
+            parts.remove(0)
+        } else {
+            Cond::And(parts)
+        })
+    }
+
+    fn parse_primary(&mut self, clause: &str) -> Result<Cond, QueryError> {
+        if self.accept(Tok::Not) {
+            return Ok(negate_cond(self.parse_primary(clause)?));
+        }
+        if self.accept(Tok::LParen) {
+            let inner = self.parse_cond(clause)?;
+            self.expect(Tok::RParen)?;
+            return Ok(inner);
+        }
+        self.parse_leaf(clause)
+    }
+
+    /// Parse one comparison, `IN (...)`, `BETWEEN`, `IS [NOT] NULL`, or
+    /// `[NOT] LIKE`. `BETWEEN` and `IN` expand into AND and OR of comparisons.
+    fn parse_leaf(&mut self, clause: &str) -> Result<Cond, QueryError> {
         let target = self.parse_operand(clause)?;
         if matches!(target, Operand::Aggregate { .. }) && clause == "WHERE" {
             return Err(self.perr(
                 "aggregate functions are not allowed in WHERE; use HAVING to filter on an aggregate",
             ));
         }
-        let label = target.label();
-        // Deliberate v1.1 scope: IN and OR need a boolean expression tree,
-        // which the predicate model does not have yet.
-        if *self.peek() == Tok::In {
-            return Err(self.unsupported_v1_1(
-                "IN (...)",
-                "use a chain of '=' predicates combined with AND",
-            ));
+        // `col NOT IN (...)` and `col NOT BETWEEN a AND b` negate the
+        // positive form, the same way a leading NOT does.
+        let negated =
+            matches!(self.peek(), Tok::Not) && matches!(self.peek_at(1), Tok::In | Tok::Between);
+        if negated {
+            self.next();
         }
         match self.peek().clone() {
+            Tok::In => {
+                self.next();
+                self.expect(Tok::LParen)?;
+                let mut alternatives = Vec::new();
+                loop {
+                    let value = self.parse_literal()?;
+                    alternatives.push(Cond::Leaf(Pred {
+                        target: target.clone(),
+                        op: Comparison::Eq,
+                        value,
+                    }));
+                    if !self.accept(Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RParen)?;
+                let positive = if alternatives.len() == 1 {
+                    alternatives.remove(0)
+                } else {
+                    Cond::Or(alternatives)
+                };
+                return Ok(if negated {
+                    negate_cond(positive)
+                } else {
+                    positive
+                });
+            }
             Tok::Between => {
                 self.next();
                 let low = self.parse_literal()?;
                 self.expect(Tok::And)?;
                 let high = self.parse_literal()?;
-                return Ok(vec![
-                    Pred {
+                let positive = Cond::And(vec![
+                    Cond::Leaf(Pred {
                         target: target.clone(),
                         op: Comparison::Gte,
                         value: low,
-                    },
-                    Pred {
+                    }),
+                    Cond::Leaf(Pred {
                         target,
                         op: Comparison::Lte,
                         value: high,
-                    },
+                    }),
                 ]);
+                return Ok(if negated {
+                    negate_cond(positive)
+                } else {
+                    positive
+                });
             }
             Tok::Is => {
                 self.next();
@@ -767,33 +923,30 @@ impl Parser {
                 } else {
                     Comparison::IsNull
                 };
-                return Ok(vec![Pred {
+                return Ok(Cond::Leaf(Pred {
                     target,
                     op,
                     value: Scalar::Null,
-                }]);
+                }));
             }
             Tok::Like => {
                 self.next();
                 let value = self.parse_like_pattern()?;
-                return Ok(vec![Pred {
+                return Ok(Cond::Leaf(Pred {
                     target,
                     op: Comparison::Like,
                     value,
-                }]);
+                }));
             }
             Tok::Not if *self.peek_at(1) == Tok::Like => {
                 self.next();
                 self.next();
                 let value = self.parse_like_pattern()?;
-                return Ok(vec![Pred {
+                return Ok(Cond::Leaf(Pred {
                     target,
                     op: Comparison::NotLike,
                     value,
-                }]);
-            }
-            Tok::Not => {
-                return Err(self.unsupported_v1_1("NOT (...)", "express the predicate positively"));
+                }));
             }
             _ => {}
         }
@@ -811,15 +964,22 @@ impl Parser {
                 )));
             }
         };
-        // A column in literal position means a column-to-column comparison,
-        // which is deliberately out of the v1.1 subset.
+        // A column on the right is a column-to-column comparison.
         if matches!(self.peek(), Tok::Ident(_)) {
-            return Err(self.perr(format!(
-                "column-to-column comparisons are not supported in tpt-strata v1.1 (deliberate scope decision); compare '{label}' against a literal instead. See docs/v1.1-scope.md"
-            )));
+            let right = self.parse_operand(clause)?;
+            if matches!(right, Operand::Aggregate { .. }) && clause == "WHERE" {
+                return Err(self.perr(
+                    "aggregate functions are not allowed in WHERE; use HAVING to filter on an aggregate",
+                ));
+            }
+            return Ok(Cond::ColCmp {
+                left: target,
+                op,
+                right,
+            });
         }
         let value = self.parse_literal()?;
-        Ok(vec![Pred { target, op, value }])
+        Ok(Cond::Leaf(Pred { target, op, value }))
     }
 
     fn parse_like_pattern(&mut self) -> Result<Scalar, QueryError> {
@@ -833,18 +993,6 @@ impl Parser {
                 other.describe()
             ))),
         }
-    }
-
-    /// Parse `pred [AND pred ...]` for a clause.
-    fn parse_pred_list(&mut self, clause: &str) -> Result<Vec<Pred>, QueryError> {
-        let mut preds = Vec::new();
-        loop {
-            preds.extend(self.parse_pred(clause)?);
-            if !self.accept(Tok::And) {
-                break;
-            }
-        }
-        Ok(preds)
     }
 
     fn parse_select(&mut self) -> Result<Select, QueryError> {
@@ -873,14 +1021,33 @@ impl Parser {
             }
         };
 
-        let mut join = None;
-        if matches!(self.peek(), Tok::Left | Tok::Outer) {
-            return Err(self.unsupported_v1_1(
-                "LEFT/OUTER joins",
-                "only a single inner equi-join is supported",
-            ));
-        }
-        if self.accept(Tok::Join) {
+        // `[LEFT | RIGHT | FULL [OUTER]] JOIN t ON a.x = b.y`, repeated. Only
+        // equi-joins. RIGHT and FULL are not reserved words, so they are
+        // matched as identifiers in this position only.
+        let mut joins = Vec::new();
+        loop {
+            let kind = if matches!(self.peek(), Tok::Left) {
+                self.next();
+                self.accept(Tok::Outer);
+                self.expect(Tok::Join)?;
+                JoinKind::Left
+            } else if self.accept(Tok::Join) {
+                JoinKind::Inner
+            } else if let Tok::Ident(word) = self.peek().clone() {
+                let kind = if word.eq_ignore_ascii_case("RIGHT") {
+                    JoinKind::Right
+                } else if word.eq_ignore_ascii_case("FULL") {
+                    JoinKind::Full
+                } else {
+                    break;
+                };
+                self.next();
+                self.accept(Tok::Outer);
+                self.expect(Tok::Join)?;
+                kind
+            } else {
+                break;
+            };
             let right = match self.peek().clone() {
                 Tok::Ident(s) => {
                     self.next();
@@ -897,32 +1064,16 @@ impl Parser {
             let left_col = self.parse_column()?;
             self.expect(Tok::Eq)?;
             let right_col = self.parse_column()?;
-            join = Some(JoinClause {
+            joins.push(JoinClause {
                 right,
                 on: (left_col, right_col),
+                kind,
             });
-            if matches!(self.peek(), Tok::Join) {
-                return Err(self.unsupported_v1_1(
-                    "multiple JOINs",
-                    "only a single equi-join per query is supported",
-                ));
-            }
         }
 
-        let mut predicates = Vec::new();
+        let mut filter = None;
         if self.accept(Tok::Where) {
-            if matches!(self.peek(), Tok::LParen) {
-                return Err(self.unsupported_v1_1(
-                    "parenthesized expressions / operator precedence in WHERE",
-                    "combine predicates with AND only",
-                ));
-            }
-            predicates = self.parse_pred_list("WHERE")?;
-            if matches!(self.peek(), Tok::Or) {
-                return Err(
-                    self.unsupported_v1_1("OR in WHERE", "combine predicates with AND only")
-                );
-            }
+            filter = Some(self.parse_cond("WHERE")?);
         }
 
         let mut group_by = Vec::new();
@@ -936,9 +1087,9 @@ impl Parser {
             }
         }
 
-        let mut having = Vec::new();
+        let mut having = None;
         if self.accept(Tok::Having) {
-            having = self.parse_pred_list("HAVING")?;
+            having = Some(self.parse_cond("HAVING")?);
         }
 
         let mut order_by = Vec::new();
@@ -974,8 +1125,8 @@ impl Parser {
             distinct,
             projections,
             from,
-            join,
-            predicates,
+            joins,
+            filter,
             group_by,
             having,
             order_by,
@@ -1094,45 +1245,175 @@ fn resolve(schema: &Schema, scope: &Scope, reference: &str) -> Result<usize, Que
     Err(missing())
 }
 
-/// Locate the two ON-clause columns, one per table, in either order.
+/// Locate the two ON-clause columns of a join: one in the tables joined so far
+/// (the accumulated plan, whose fields are qualified `table.column`), and one
+/// in the table being joined, in either order.
 fn join_keys(
-    left: &Table,
-    lname: &str,
+    acc: &Schema,
+    acc_tables: &[String],
     right: &Table,
     rname: &str,
     a: &str,
     b: &str,
 ) -> Result<(usize, usize), QueryError> {
-    let tables = [lname.to_string(), rname.to_string()];
-    let locate = |reference: &str| -> Result<(bool, usize), QueryError> {
-        if let Some((which, bare)) = split_table(reference, &tables) {
-            let table = if which == 0 { left } else { right };
-            return Ok((which == 0, table.column_index(bare)?));
-        }
-        if let Some(i) = left.schema().index_of(reference) {
-            return Ok((true, i));
-        }
-        if let Some(i) = right.schema().index_of(reference) {
-            return Ok((false, i));
-        }
-        let mut available = names(left.schema());
+    let mut all: Vec<String> = acc_tables.to_vec();
+    all.push(rname.to_string());
+    let missing = |reference: &str| {
+        let mut available = names(acc);
         available.extend(names(right.schema()));
-        Err(QueryError::MissingColumn {
+        QueryError::MissingColumn {
             column: reference.to_string(),
             available,
-        })
+        }
     };
-    let (a_left, ia) = locate(a)?;
-    let (b_left, ib) = locate(b)?;
-    match (a_left, b_left) {
+    // Returns (is_accumulated, index in that side's schema).
+    let locate = |reference: &str| -> Result<(bool, usize), QueryError> {
+        if let Some((which, bare)) = split_table(reference, &all) {
+            if which == all.len() - 1 {
+                return Ok((false, right.column_index(bare)?));
+            }
+            let qualified = format!("{}.{}", all[which], bare);
+            return acc
+                .index_of(&qualified)
+                .map(|i| (true, i))
+                .ok_or_else(|| missing(reference));
+        }
+        let suffix = format!(".{reference}");
+        let hits: Vec<usize> = acc
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name.ends_with(&suffix))
+            .map(|(i, _)| i)
+            .collect();
+        match hits.as_slice() {
+            [i] => return Ok((true, *i)),
+            [] => {}
+            many => {
+                let options: Vec<&str> =
+                    many.iter().map(|&i| acc.fields[i].name.as_str()).collect();
+                return Err(QueryError::UnsupportedOperation {
+                    message: format!(
+                        "column '{reference}' is ambiguous; qualify it as one of: {}",
+                        options.join(", ")
+                    ),
+                });
+            }
+        }
+        match right.schema().index_of(reference) {
+            Some(i) => Ok((false, i)),
+            None => Err(missing(reference)),
+        }
+    };
+    let (a_acc, ia) = locate(a)?;
+    let (b_acc, ib) = locate(b)?;
+    match (a_acc, b_acc) {
         (true, false) => Ok((ia, ib)),
         (false, true) => Ok((ib, ia)),
         _ => Err(QueryError::UnsupportedOperation {
             message: format!(
-                "the ON clause must compare a column from '{lname}' with one from '{rname}'"
+                "the ON clause must compare a column from the tables joined so far with one from '{rname}'"
             ),
         }),
     }
+}
+
+/// Every column reference in the query, or `None` when the query reads every
+/// column (a `*` in the select list).
+fn needed_refs(sel: &Select) -> Option<Vec<String>> {
+    if sel
+        .projections
+        .iter()
+        .any(|p| matches!(p, ProjectionItem::Wild))
+    {
+        return None;
+    }
+    fn push(out: &mut Vec<String>, op: &Operand) {
+        match op {
+            Operand::Column(c)
+            | Operand::Aggregate {
+                column: Some(c), ..
+            } => out.push(c.clone()),
+            Operand::Aggregate { column: None, .. } => {}
+        }
+    }
+    let mut out = Vec::new();
+    for p in &sel.projections {
+        if let ProjectionItem::Expr { operand, .. } = p {
+            push(&mut out, operand);
+        }
+    }
+    let mut conds = Vec::new();
+    for c in sel.filter.iter().chain(sel.having.iter()) {
+        cond_operands(c, &mut conds);
+    }
+    for o in &conds {
+        push(&mut out, o);
+    }
+    // An ORDER BY that names a SELECT alias is not a column reference.
+    let aliases: Vec<&str> = sel
+        .projections
+        .iter()
+        .filter_map(|p| match p {
+            ProjectionItem::Expr { alias: Some(a), .. } => Some(a.as_str()),
+            _ => None,
+        })
+        .collect();
+    for (o, _) in &sel.order_by {
+        match o {
+            Operand::Column(c) if aliases.contains(&c.as_str()) => {}
+            _ => push(&mut out, o),
+        }
+    }
+    out.extend(sel.group_by.iter().cloned());
+    for j in &sel.joins {
+        out.push(j.on.0.clone());
+        out.push(j.on.1.clone());
+    }
+    Some(out)
+}
+
+/// Whether every reference names a column of one of the query's tables.
+fn refs_resolve(refs: &[String], inputs: &[(&str, &Table)]) -> bool {
+    refs.iter().all(|r| {
+        inputs.iter().any(|(name, table)| {
+            let prefix = format!("{name}.");
+            table
+                .schema()
+                .fields
+                .iter()
+                .any(|f| r == &f.name || r.strip_prefix(&prefix) == Some(f.name.as_str()))
+        })
+    })
+}
+
+/// Keep only the columns a query can read from table `name`. A column is
+/// kept when a reference names it, bare or qualified with `name`. The column
+/// count never drops to zero, so the row count survives `COUNT(*)`.
+fn prune(table: &Table, name: &str, needed: Option<&[String]>) -> Table {
+    let Some(needed) = needed else {
+        return table.clone();
+    };
+    let prefix = format!("{name}.");
+    let mut keep: Vec<usize> = table
+        .schema()
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            needed
+                .iter()
+                .any(|r| r == &f.name || r.strip_prefix(&prefix) == Some(f.name.as_str()))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if keep.is_empty() && !table.schema().is_empty() {
+        keep.push(0);
+    }
+    if keep.len() == table.schema().len() {
+        return table.clone();
+    }
+    table.select_columns(&keep)
 }
 
 /// A table as a plan source, with every column renamed to `name.column`.
@@ -1298,10 +1579,7 @@ fn has_aggregates(sel: &Select) -> bool {
                 ..
             }
         )
-    }) || sel
-        .having
-        .iter()
-        .any(|p| matches!(p.target, Operand::Aggregate { .. }))
+    }) || sel.having.iter().any(cond_has_aggregate)
         || sel
             .order_by
             .iter()
@@ -1434,9 +1712,13 @@ fn plan_grouped(
             }
         }
     }
-    for p in &sel.having {
-        if let Operand::Aggregate { func, column } = &p.target {
-            add_aggregate(&mut aggs, &input, scope, *func, column.as_deref())?;
+    if let Some(c) = &sel.having {
+        let mut ops = Vec::new();
+        cond_operands(c, &mut ops);
+        for o in &ops {
+            if let Operand::Aggregate { func, column } = o {
+                add_aggregate(&mut aggs, &input, scope, *func, column.as_deref())?;
+            }
         }
     }
     for (o, _) in &sel.order_by {
@@ -1470,10 +1752,9 @@ fn plan_grouped(
         }
     };
 
-    for p in &sel.having {
-        let idx = agg_ref(&p.target, true)?;
-        let bound = bind_predicate(&agg_schema, idx, p)?;
-        plan = Arc::new(FilterExec::new(plan, bound));
+    if let Some(c) = &sel.having {
+        let cond = bind_cond(c, &|op: &Operand| agg_ref(op, true), &agg_schema)?;
+        plan = apply_filter(plan, cond);
     }
 
     if !sel.order_by.is_empty() {
@@ -1560,47 +1841,66 @@ impl<'a> SqlContext<'a> {
     /// Parse, plan, and return the physical plan for `sql` without running it.
     fn build_plan(&self, sql: &str) -> Result<Arc<dyn PhysicalPlan>, QueryError> {
         let sel = parse_sql(sql)?;
-        let left = self.lookup(&sel.from)?;
+        let left_base = self.lookup(&sel.from)?;
+        // Prune only when every reference resolves. Otherwise the query fails
+        // as before, and its error lists the table's full set of columns.
+        let mut inputs: Vec<(&str, &Table)> = vec![(sel.from.as_str(), left_base)];
+        for join in &sel.joins {
+            inputs.push((join.right.as_str(), self.lookup(&join.right)?));
+        }
+        let needed = needed_refs(&sel).filter(|refs| refs_resolve(refs, &inputs));
+        let left_owned = prune(left_base, &sel.from, needed.as_deref());
+        let left = &left_owned;
 
         let mut tables = vec![sel.from.clone()];
-        let mut plan: Arc<dyn PhysicalPlan> = match &sel.join {
-            Some(join) => {
-                if join.right == sel.from {
-                    return Err(QueryError::UnsupportedOperation {
-                        message: format!(
-                            "self-joins are not supported: '{}' cannot be joined with itself (table aliases are not supported yet)",
-                            sel.from
-                        ),
-                    });
-                }
-                let right = self.lookup(&join.right)?;
-                let (lk, rk) =
-                    join_keys(left, &sel.from, right, &join.right, &join.on.0, &join.on.1)?;
-                tables.push(join.right.clone());
-                let lp = qualified_source(left, &sel.from);
-                let rp = qualified_source(right, &join.right);
-                Arc::new(JoinExec::try_new(lp, rp, lk, rk)?)
-            }
-            None => Arc::new(DataSource::from_shared(
+        let mut plan: Arc<dyn PhysicalPlan> = if sel.joins.is_empty() {
+            Arc::new(DataSource::from_shared(
                 Arc::new(left.schema().clone()),
                 left.batches().to_vec(),
-            )),
+            ))
+        } else {
+            qualified_source(left, &sel.from)
         };
+        for join in &sel.joins {
+            if tables.contains(&join.right) {
+                return Err(QueryError::UnsupportedOperation {
+                    message: format!(
+                        "self-joins are not supported: '{}' cannot be joined with itself (table aliases are not supported yet)",
+                        join.right
+                    ),
+                });
+            }
+            let right_base = self.lookup(&join.right)?;
+            let right_owned = prune(right_base, &join.right, needed.as_deref());
+            let (lk, rk) = join_keys(
+                plan.schema(),
+                &tables,
+                &right_owned,
+                &join.right,
+                &join.on.0,
+                &join.on.1,
+            )?;
+            let rp = qualified_source(&right_owned, &join.right);
+            plan = Arc::new(JoinExec::try_new_join(plan, rp, lk, rk, join.kind)?);
+            tables.push(join.right.clone());
+        }
         let scope = Scope {
             tables,
-            joined: sel.join.is_some(),
+            joined: !sel.joins.is_empty(),
         };
 
-        for pred in &sel.predicates {
-            let label = pred.target.label();
-            let idx = resolve(plan.schema(), &scope, &label)?;
-            let bound = bind_predicate(plan.schema(), idx, pred)?;
-            plan = Arc::new(FilterExec::new(plan, bound));
+        if let Some(c) = &sel.filter {
+            let cond = bind_cond(
+                c,
+                &|op: &Operand| resolve_operand(op, plan.schema(), &scope),
+                plan.schema(),
+            )?;
+            plan = apply_filter(plan, cond);
         }
 
         let grouped = has_aggregates(&sel)
             || !sel.group_by.is_empty()
-            || !sel.having.is_empty()
+            || sel.having.is_some()
             || sel.distinct;
         plan = if grouped {
             plan_grouped(plan, &scope, &sel)?
@@ -1648,5 +1948,107 @@ impl<'a> SqlContext<'a> {
 impl<'a> Default for SqlContext<'a> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Whether a condition refers to an aggregate.
+fn cond_has_aggregate(c: &Cond) -> bool {
+    let mut ops = Vec::new();
+    cond_operands(c, &mut ops);
+    ops.iter().any(|o| matches!(o, Operand::Aggregate { .. }))
+}
+
+/// Resolve a `WHERE` operand. Aggregates are rejected earlier, in the parser.
+fn resolve_operand(op: &Operand, schema: &Schema, scope: &Scope) -> Result<usize, QueryError> {
+    match op {
+        Operand::Column(c) => resolve(schema, scope, c),
+        Operand::Aggregate { .. } => Err(sql_err(
+            "aggregate functions are not allowed in WHERE; use HAVING to filter on an aggregate",
+        )),
+    }
+}
+
+/// Bind a condition: resolve each operand with `resolve`, and check each
+/// comparison against `schema`.
+fn bind_cond(
+    c: &Cond,
+    resolve: &dyn Fn(&Operand) -> Result<usize, QueryError>,
+    schema: &Schema,
+) -> Result<Condition, QueryError> {
+    Ok(match c {
+        Cond::Leaf(p) => {
+            let idx = resolve(&p.target)?;
+            Condition::Cmp(bind_predicate(schema, idx, p)?)
+        }
+        Cond::ColCmp { left, op, right } => {
+            let l = resolve(left)?;
+            let r = resolve(right)?;
+            check_comparable(schema, l, r, left, right)?;
+            Condition::ColCmp {
+                left: l,
+                op: *op,
+                right: r,
+            }
+        }
+        Cond::And(parts) => Condition::And(
+            parts
+                .iter()
+                .map(|p| bind_cond(p, resolve, schema))
+                .collect::<Result<_, _>>()?,
+        ),
+        Cond::Or(parts) => Condition::Or(
+            parts
+                .iter()
+                .map(|p| bind_cond(p, resolve, schema))
+                .collect::<Result<_, _>>()?,
+        ),
+    })
+}
+
+/// Two columns can be compared when they have the same type, or both are numeric.
+fn check_comparable(
+    schema: &Schema,
+    l: usize,
+    r: usize,
+    left: &Operand,
+    right: &Operand,
+) -> Result<(), QueryError> {
+    let (Some(lf), Some(rf)) = (schema.field(l), schema.field(r)) else {
+        return Err(sql_err("internal error: resolved column missing"));
+    };
+    let numeric =
+        |dt: DataType| matches!(dt, DataType::Int32 | DataType::Int64 | DataType::Float64);
+    if lf.data_type == rf.data_type || (numeric(lf.data_type) && numeric(rf.data_type)) {
+        return Ok(());
+    }
+    Err(QueryError::TypeMismatch {
+        column: left.label(),
+        expected: lf.data_type.name(),
+        actual: rf.data_type.name(),
+        context: format!(
+            "cannot compare '{}' ({}) with '{}' ({})",
+            left.label(),
+            lf.data_type,
+            right.label(),
+            rf.data_type
+        ),
+    })
+}
+
+/// Apply a bound condition. A conjunction of plain comparisons becomes a chain
+/// of filters, which keeps the typed fast path. Anything else is one filter.
+fn apply_filter(plan: Arc<dyn PhysicalPlan>, cond: Condition) -> Arc<dyn PhysicalPlan> {
+    match cond {
+        Condition::Cmp(p) => Arc::new(FilterExec::new(plan, p)),
+        Condition::And(parts) if parts.iter().all(|c| matches!(c, Condition::Cmp(_))) => {
+            let mut plan = plan;
+            for part in parts {
+                if let Condition::Cmp(p) = part {
+                    plan = Arc::new(FilterExec::new(plan, p));
+                }
+            }
+            plan
+        }
+        other => Arc::new(CondFilterExec::new(plan, other)),
     }
 }

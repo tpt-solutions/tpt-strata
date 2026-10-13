@@ -101,15 +101,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all --all-features
 
-  msrv:
-    name: MSRV check (1.75)
+  # Each crate's rust-version is in its Cargo.toml. The core and serde crates
+  # are checked on 1.75. The Arrow/Parquet stack needs 1.85, which the rest of
+  # the workspace is checked on.
+  msrv-core:
+    name: MSRV check, core and serde (1.75)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.75.0
       - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p tpt-strata -p tpt-strata-serde --all-features
+      - run: cargo test -p tpt-strata -p tpt-strata-serde --all-features
+
+  msrv-workspace:
+    name: MSRV check, workspace (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --all --all-features
-      - run: cargo test --all --all-features
 
   deny:
     name: cargo-deny

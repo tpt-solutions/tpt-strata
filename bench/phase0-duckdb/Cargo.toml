@@ -1,0 +1,12 @@
+[package]
+name = "phase0-duckdb"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Phase 0 comparison sketch: the same employee case on DuckDB, for validation-memo.md"
+
+# A standalone workspace, so DuckDB never joins the tpt-strata workspace.
+[workspace]
+
+[dependencies]
+duckdb = { version = "1", features = ["bundled"] }

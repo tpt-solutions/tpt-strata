@@ -1,17 +1,48 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::array::{empty_array, ArrayRef, BoolArray, F64Array, I32Array, I64Array, StrArray};
 use crate::batch::{Batch, BatchRef};
 use crate::error::QueryError;
 use crate::schema::{DataType, Field, Schema};
-use crate::types::{numeric_cmp, sort_cmp, Scalar};
+use crate::types::{numeric_cmp, Scalar};
+
+pub use crate::aggregate::{AggFunc, Aggregate, AggregateExec};
+use crate::key::{key_at, FastMap, KeyPart};
+
+/// Batches pulled one at a time from a plan. Dropping the stream stops the
+/// work upstream, which is how `LIMIT` avoids reading its whole input.
+pub type BatchStream = Box<dyn Iterator<Item = Result<BatchRef, QueryError>> + Send>;
 
 /// A physical plan node that can be executed to produce batches.
+///
+/// Two entry points, one of which each operator implements:
+///
+/// - [`open`](PhysicalPlan::open) yields batches lazily. Scan, filter,
+///   project and limit implement it, so a `LIMIT` above them stops reading
+///   input once it has enough rows.
+/// - [`execute`](PhysicalPlan::execute) returns every batch at once. Sort,
+///   join and aggregate need all their input, so they implement it. Its
+///   default collects `open`, and always returns at least one batch, empty if
+///   there are no rows.
 pub trait PhysicalPlan: Send + Sync {
     fn schema(&self) -> &Schema;
-    fn execute(&self) -> Result<Vec<BatchRef>, QueryError>;
+
+    fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
+        let mut out = self.open()?.collect::<Result<Vec<_>, _>>()?;
+        if out.is_empty() {
+            out.push(empty_batch(&Arc::new(self.schema().clone())));
+        }
+        Ok(out)
+    }
+
+    /// Pull batches lazily. The default runs [`execute`](PhysicalPlan::execute)
+    /// and yields its batches, for operators that cannot stream.
+    fn open(&self) -> Result<BatchStream, QueryError> {
+        let batches = self.execute()?;
+        Ok(Box::new(batches.into_iter().map(Ok)))
+    }
     /// Write this operator and its inputs as an indented tree, one operator
     /// per line, root first.
     fn explain(&self, depth: usize, out: &mut String) {
@@ -19,7 +50,7 @@ pub trait PhysicalPlan: Send + Sync {
     }
 }
 
-fn push_line(out: &mut String, depth: usize, text: &str) {
+pub(crate) fn push_line(out: &mut String, depth: usize, text: &str) {
     for _ in 0..depth {
         out.push_str("  ");
     }
@@ -33,7 +64,7 @@ fn internal(message: &str) -> QueryError {
     }
 }
 
-fn names(schema: &Schema) -> Vec<String> {
+pub(crate) fn names(schema: &Schema) -> Vec<String> {
     schema.fields.iter().map(|f| f.name.clone()).collect()
 }
 
@@ -49,14 +80,30 @@ fn empty_batch(schema: &Arc<Schema>) -> BatchRef {
 
 /// Build a new array for column `col` by reading the `(batch, row)` positions
 /// in `pos`, in order. Typed end to end: no per-value `Scalar` boxing.
-fn gather(batches: &[BatchRef], col: usize, pos: &[(usize, usize)], dt: DataType) -> ArrayRef {
+pub(crate) fn gather(
+    batches: &[BatchRef],
+    col: usize,
+    pos: &[(usize, usize)],
+    dt: DataType,
+) -> ArrayRef {
+    gather_opt(batches, col, pos.iter().map(|&p| Some(p)), dt)
+}
+
+/// As [`gather`], but a `None` position yields a NULL row.
+pub(crate) fn gather_opt<I>(batches: &[BatchRef], col: usize, pos: I, dt: DataType) -> ArrayRef
+where
+    I: IntoIterator<Item = Option<(usize, usize)>>,
+{
     macro_rules! take_typed {
         ($variant:ident, $arr:ident) => {{
             let vals = pos
-                .iter()
-                .map(|&(b, r)| match &batches[b].columns[col] {
-                    ArrayRef::$variant(a) => a.0.get(r).cloned().flatten(),
-                    _ => None,
+                .into_iter()
+                .map(|p| match p {
+                    Some((b, r)) => match &*batches[b].columns[col] {
+                        ArrayRef::$variant(a) => a.0.get(r).cloned().flatten(),
+                        _ => None,
+                    },
+                    None => None,
                 })
                 .collect();
             ArrayRef::$variant($arr(vals))
@@ -68,53 +115,6 @@ fn gather(batches: &[BatchRef], col: usize, pos: &[(usize, usize)], dt: DataType
         DataType::Int64 => take_typed!(Int64, I64Array),
         DataType::Float64 => take_typed!(Float64, F64Array),
         DataType::Utf8 => take_typed!(Utf8, StrArray),
-    }
-}
-
-/// Build a typed array from finished scalars. Values of another type become
-/// nulls, which only happens for the all-null result of an empty group.
-fn array_from_scalars(dt: DataType, vals: &[Scalar]) -> ArrayRef {
-    match dt {
-        DataType::Boolean => ArrayRef::Boolean(BoolArray(
-            vals.iter()
-                .map(|s| match s {
-                    Scalar::Bool(b) => Some(*b),
-                    _ => None,
-                })
-                .collect(),
-        )),
-        DataType::Int32 => ArrayRef::Int32(I32Array(
-            vals.iter()
-                .map(|s| match s {
-                    Scalar::I32(b) => Some(*b),
-                    _ => None,
-                })
-                .collect(),
-        )),
-        DataType::Int64 => ArrayRef::Int64(I64Array(
-            vals.iter()
-                .map(|s| match s {
-                    Scalar::I64(b) => Some(*b),
-                    _ => None,
-                })
-                .collect(),
-        )),
-        DataType::Float64 => ArrayRef::Float64(F64Array(
-            vals.iter()
-                .map(|s| match s {
-                    Scalar::F64(b) => Some(*b),
-                    _ => None,
-                })
-                .collect(),
-        )),
-        DataType::Utf8 => ArrayRef::Utf8(StrArray(
-            vals.iter()
-                .map(|s| match s {
-                    Scalar::Str(b) => Some(b.clone()),
-                    _ => None,
-                })
-                .collect(),
-        )),
     }
 }
 
@@ -158,6 +158,10 @@ impl PhysicalPlan for DataSource {
 
     fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
         Ok(self.batches.clone())
+    }
+
+    fn open(&self) -> Result<BatchStream, QueryError> {
+        Ok(Box::new(self.batches.clone().into_iter().map(Ok)))
     }
 
     fn explain(&self, depth: usize, out: &mut String) {
@@ -277,7 +281,57 @@ pub struct Predicate {
     pub value: Scalar,
 }
 
+/// The literal as a typed key, for the fast filter path. Floats and NULL are
+/// left out: NaN is unordered in SQL but totally ordered as a key, so floats
+/// keep the general path.
+fn literal_key(v: &Scalar) -> Option<KeyPart<'_>> {
+    match v {
+        Scalar::Bool(b) => Some(KeyPart::Bool(*b)),
+        Scalar::I32(n) => Some(KeyPart::I32(*n)),
+        Scalar::I64(n) => Some(KeyPart::I64(*n)),
+        Scalar::Str(s) => Some(KeyPart::Str(s)),
+        Scalar::F64(_) | Scalar::Null => None,
+    }
+}
+
 impl Predicate {
+    /// The rows of `batch` that pass, in order.
+    ///
+    /// When the column and the literal have the same type, comparisons run on
+    /// typed keys with no per-row `Scalar`. Otherwise each row goes through
+    /// [`Predicate::matches`], which has the full SQL rules.
+    pub fn select(&self, batch: &Batch) -> Vec<usize> {
+        let typed = match self.op {
+            Comparison::IsNull | Comparison::IsNotNull | Comparison::Like | Comparison::NotLike => {
+                None
+            }
+            _ => literal_key(&self.value),
+        };
+        let column = batch.columns.get(self.column);
+        (0..batch.row_count())
+            .filter(|&row| {
+                if let (Some(lit), Some(col)) = (typed, column) {
+                    let key = key_at(col, row);
+                    // Same discriminant means same column type. A NULL key never
+                    // matches, which the fallback path also returns.
+                    if std::mem::discriminant(&key) == std::mem::discriminant(&lit) {
+                        let ord = key.cmp(&lit);
+                        return match self.op {
+                            Comparison::Eq => ord == Ordering::Equal,
+                            Comparison::NotEq => ord != Ordering::Equal,
+                            Comparison::Gt => ord == Ordering::Greater,
+                            Comparison::Gte => ord != Ordering::Less,
+                            Comparison::Lt => ord == Ordering::Less,
+                            Comparison::Lte => ord != Ordering::Greater,
+                            _ => self.matches(batch, row),
+                        };
+                    }
+                }
+                self.matches(batch, row)
+            })
+            .collect()
+    }
+
     /// Whether `row` passes the predicate.
     ///
     /// A NULL on either side of a comparison makes it unknown, and unknown
@@ -322,19 +376,15 @@ impl PhysicalPlan for FilterExec {
         &self.schema
     }
 
-    fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
-        let mut out = Vec::new();
-        for batch in self.input.execute()? {
-            let keep: Vec<usize> = (0..batch.row_count())
-                .filter(|&row| self.predicate.matches(&batch, row))
-                .collect();
-            let columns = batch.columns.iter().map(|c| c.take(&keep)).collect();
-            out.push(Arc::new(Batch::new_unchecked(self.schema.clone(), columns)));
-        }
-        if out.is_empty() {
-            out.push(empty_batch(&self.schema));
-        }
-        Ok(out)
+    fn open(&self) -> Result<BatchStream, QueryError> {
+        let predicate = self.predicate.clone();
+        let schema = self.schema.clone();
+        Ok(Box::new(self.input.open()?.map(move |batch| {
+            let batch = batch?;
+            let keep = predicate.select(&batch);
+            let columns: Vec<ArrayRef> = batch.columns.iter().map(|c| c.take(&keep)).collect();
+            Ok(Arc::new(Batch::new_unchecked(schema.clone(), columns)))
+        })))
     }
 
     fn explain(&self, depth: usize, out: &mut String) {
@@ -403,11 +453,12 @@ impl PhysicalPlan for ProjectExec {
         &self.schema
     }
 
-    fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
-        let mut out = Vec::new();
-        for batch in self.input.execute()? {
-            let columns = self
-                .exprs
+    fn open(&self) -> Result<BatchStream, QueryError> {
+        let exprs = self.exprs.clone();
+        let schema = self.schema.clone();
+        Ok(Box::new(self.input.open()?.map(move |batch| {
+            let batch = batch?;
+            let columns = exprs
                 .iter()
                 .map(|e| {
                     batch
@@ -417,12 +468,8 @@ impl PhysicalPlan for ProjectExec {
                         .ok_or_else(|| internal("projection column out of range"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            out.push(Arc::new(Batch::new_unchecked(self.schema.clone(), columns)));
-        }
-        if out.is_empty() {
-            out.push(empty_batch(&self.schema));
-        }
-        Ok(out)
+            Ok(Arc::new(Batch::new_shared(schema.clone(), columns)))
+        })))
     }
 
     fn explain(&self, depth: usize, out: &mut String) {
@@ -432,419 +479,45 @@ impl PhysicalPlan for ProjectExec {
     }
 }
 
-// === Aggregate ===
-
-/// Whether a data type is orderable for `MIN`/`MAX` (and `ORDER BY`).
-///
-/// Every native v1 type is orderable, so this is a no-op guard today; it
-/// exists so a future non-orderable `DataType` (e.g. binary/JSON) fails at
-/// plan-build time with a named diagnostic instead of falling through to
-/// `scalar_cmp`'s equal-for-unknown fallback at runtime.
-fn is_orderable(dt: DataType) -> bool {
-    matches!(
-        dt,
-        DataType::Boolean | DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Utf8
-    )
-}
-
-/// Whether a data type is numeric for `SUM`/`AVG`.
-fn is_numeric(dt: DataType) -> bool {
-    matches!(dt, DataType::Int32 | DataType::Int64 | DataType::Float64)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AggFunc {
-    Sum,
-    Count,
-    Min,
-    Max,
-    Avg,
-}
-
-impl std::fmt::Display for AggFunc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AggFunc::Sum => write!(f, "SUM"),
-            AggFunc::Count => write!(f, "COUNT"),
-            AggFunc::Min => write!(f, "MIN"),
-            AggFunc::Max => write!(f, "MAX"),
-            AggFunc::Avg => write!(f, "AVG"),
-        }
-    }
-}
-
-/// An aggregate function applied to one input column.
-#[derive(Debug, Clone)]
-pub struct Aggregate {
-    pub func: AggFunc,
-    pub column: usize,
-    pub out_name: String,
-    /// Whether `COUNT(*)` semantics apply: count every row, including nulls.
-    /// `false` means `COUNT(col)`, which skips null values.
-    pub count_star: bool,
-}
-
-trait Accumulator: Send + Sync {
-    fn add(&mut self, value: Scalar);
-    fn finish(&self) -> Result<Scalar, QueryError>;
-}
-
-/// `SUM`. Integer input sums in `i128` and yields `Int64`, failing loudly on
-/// overflow. Float input sums in `f64` and yields `Float64`.
-struct SumAcc {
-    label: String,
-    as_float: bool,
-    int: i128,
-    float: f64,
-    saw: bool,
-}
-
-impl Accumulator for SumAcc {
-    fn add(&mut self, value: Scalar) {
-        match value {
-            Scalar::I32(v) => {
-                self.int += i128::from(v);
-                self.float += f64::from(v);
-                self.saw = true;
-            }
-            Scalar::I64(v) => {
-                self.int += i128::from(v);
-                self.float += v as f64;
-                self.saw = true;
-            }
-            Scalar::F64(v) => {
-                self.float += v;
-                self.saw = true;
-            }
-            _ => {}
-        }
-    }
-
-    fn finish(&self) -> Result<Scalar, QueryError> {
-        if !self.saw {
-            return Ok(Scalar::Null);
-        }
-        if self.as_float {
-            return Ok(Scalar::F64(self.float));
-        }
-        i64::try_from(self.int)
-            .map(Scalar::I64)
-            .map_err(|_| QueryError::UnsupportedOperation {
-                message: format!(
-                    "SUM overflowed i64 in '{}'; narrow the input or sum a float column",
-                    self.label
-                ),
-            })
-    }
-}
-
-struct CountAcc {
-    n: i64,
-    count_star: bool,
-}
-
-impl Accumulator for CountAcc {
-    fn add(&mut self, value: Scalar) {
-        if self.count_star || !matches!(value, Scalar::Null) {
-            self.n += 1;
-        }
-    }
-    fn finish(&self) -> Result<Scalar, QueryError> {
-        Ok(Scalar::I64(self.n))
-    }
-}
-
-struct MinAcc {
-    min: Option<Scalar>,
-}
-
-impl Accumulator for MinAcc {
-    fn add(&mut self, value: Scalar) {
-        match (&self.min, &value) {
-            (_, Scalar::Null) => {}
-            (None, _) => self.min = Some(value),
-            (Some(cur), v) if sort_cmp(v, cur) == Ordering::Less => self.min = Some(value),
-            _ => {}
-        }
-    }
-    fn finish(&self) -> Result<Scalar, QueryError> {
-        Ok(self.min.clone().unwrap_or(Scalar::Null))
-    }
-}
-
-struct MaxAcc {
-    max: Option<Scalar>,
-}
-
-impl Accumulator for MaxAcc {
-    fn add(&mut self, value: Scalar) {
-        match (&self.max, &value) {
-            (_, Scalar::Null) => {}
-            (None, _) => self.max = Some(value),
-            (Some(cur), v) if sort_cmp(v, cur) == Ordering::Greater => self.max = Some(value),
-            _ => {}
-        }
-    }
-    fn finish(&self) -> Result<Scalar, QueryError> {
-        Ok(self.max.clone().unwrap_or(Scalar::Null))
-    }
-}
-
-/// `AVG`. Integer input is summed exactly in `i128` before dividing.
-struct AvgAcc {
-    int: i128,
-    float: f64,
-    n: usize,
-}
-
-impl Accumulator for AvgAcc {
-    fn add(&mut self, value: Scalar) {
-        match value {
-            Scalar::I32(v) => {
-                self.int += i128::from(v);
-                self.n += 1;
-            }
-            Scalar::I64(v) => {
-                self.int += i128::from(v);
-                self.n += 1;
-            }
-            Scalar::F64(v) => {
-                self.float += v;
-                self.n += 1;
-            }
-            _ => {}
-        }
-    }
-    fn finish(&self) -> Result<Scalar, QueryError> {
-        if self.n == 0 {
-            Ok(Scalar::Null)
-        } else {
-            let total = self.int as f64 + self.float;
-            Ok(Scalar::F64(total / self.n as f64))
-        }
-    }
-}
-
-fn new_accumulator(agg: &Aggregate, input: DataType) -> Box<dyn Accumulator> {
-    match agg.func {
-        AggFunc::Sum => Box::new(SumAcc {
-            label: agg.out_name.clone(),
-            as_float: input == DataType::Float64,
-            int: 0,
-            float: 0.0,
-            saw: false,
-        }),
-        AggFunc::Count => Box::new(CountAcc {
-            n: 0,
-            count_star: agg.count_star,
-        }),
-        AggFunc::Min => Box::new(MinAcc { min: None }),
-        AggFunc::Max => Box::new(MaxAcc { max: None }),
-        AggFunc::Avg => Box::new(AvgAcc {
-            int: 0,
-            float: 0.0,
-            n: 0,
-        }),
-    }
-}
-
-/// Resolve the output [`DataType`] of an aggregate over an input schema.
-fn aggregate_output_type(input_schema: &Schema, agg: &Aggregate) -> DataType {
-    let input = input_schema.field(agg.column).map(|f| f.data_type);
-    match agg.func {
-        AggFunc::Count => DataType::Int64,
-        AggFunc::Min | AggFunc::Max => input.unwrap_or(DataType::Float64),
-        AggFunc::Sum => match input {
-            Some(DataType::Int32 | DataType::Int64) => DataType::Int64,
-            _ => DataType::Float64,
-        },
-        AggFunc::Avg => DataType::Float64,
-    }
-}
-
-fn cmp_keys(a: &[Scalar], b: &[Scalar]) -> Ordering {
-    for (x, y) in a.iter().zip(b) {
-        let ord = sort_cmp(x, y);
-        if ord != Ordering::Equal {
-            return ord;
-        }
-    }
-    Ordering::Equal
-}
-
-/// One group: its key values and one accumulator per aggregate.
-type GroupEntry = (Vec<Scalar>, Vec<Box<dyn Accumulator>>);
-
-pub struct AggregateExec {
-    input: Arc<dyn PhysicalPlan>,
-    group_by: Vec<usize>,
-    aggregates: Vec<Aggregate>,
-    schema: Arc<Schema>,
-}
-
-impl AggregateExec {
-    pub fn new(
-        input: Arc<dyn PhysicalPlan>,
-        group_by: Vec<usize>,
-        aggregates: Vec<Aggregate>,
-    ) -> Result<Self, QueryError> {
-        let input_schema = input.schema();
-        let mut fields = Vec::new();
-        for &idx in &group_by {
-            let f = input_schema
-                .field(idx)
-                .ok_or_else(|| QueryError::MissingColumn {
-                    column: format!("index {idx}"),
-                    available: names(input_schema),
-                })?;
-            fields.push(Field::new(f.name.clone(), f.data_type, f.nullable));
-        }
-        for agg in &aggregates {
-            let f = input_schema
-                .field(agg.column)
-                .ok_or_else(|| QueryError::MissingColumn {
-                    column: format!("index {}", agg.column),
-                    available: names(input_schema),
-                })?;
-            if matches!(agg.func, AggFunc::Sum | AggFunc::Avg) && !is_numeric(f.data_type) {
-                return Err(QueryError::UnsupportedOperation {
-                    message: format!(
-                        "aggregate '{}' requires a numeric column; column '{}' has type {}",
-                        agg.out_name, f.name, f.data_type
-                    ),
-                });
-            }
-            if matches!(agg.func, AggFunc::Min | AggFunc::Max) && !is_orderable(f.data_type) {
-                return Err(QueryError::UnsupportedOperation {
-                    message: format!(
-                        "aggregate '{}' requires an orderable column; column '{}' has type {}",
-                        agg.out_name, f.name, f.data_type
-                    ),
-                });
-            }
-            fields.push(Field::new(
-                agg.out_name.clone(),
-                aggregate_output_type(input_schema, agg),
-                true,
-            ));
-        }
-        let schema = Arc::new(Schema::new(fields));
-        Ok(Self {
-            input,
-            group_by,
-            aggregates,
-            schema,
-        })
-    }
-
-    fn group_key(&self, batch: &Batch, row: usize) -> Vec<Scalar> {
-        self.group_by
-            .iter()
-            .map(|&idx| batch.columns[idx].get(row).unwrap_or(Scalar::Null))
-            .collect()
-    }
-
-    fn new_accumulators(&self) -> Vec<Box<dyn Accumulator>> {
-        let input = self.input.schema();
-        self.aggregates
-            .iter()
-            .map(|a| {
-                let dt = input
-                    .field(a.column)
-                    .map_or(DataType::Float64, |f| f.data_type);
-                new_accumulator(a, dt)
-            })
-            .collect()
-    }
-}
-
-impl PhysicalPlan for AggregateExec {
-    fn schema(&self) -> &Schema {
-        &self.schema
-    }
-
-    fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
-        let batches = self.input.execute()?;
-
-        let mut groups: HashMap<Vec<Scalar>, Vec<Box<dyn Accumulator>>> = HashMap::new();
-        for batch in &batches {
-            for row in 0..batch.row_count() {
-                let key = self.group_key(batch, row);
-                let accs = groups.entry(key).or_insert_with(|| self.new_accumulators());
-                for (i, agg) in self.aggregates.iter().enumerate() {
-                    let value = batch.columns[agg.column].get(row).unwrap_or(Scalar::Null);
-                    accs[i].add(value);
-                }
-            }
-        }
-
-        let mut entries: Vec<GroupEntry> = groups.into_iter().collect();
-        if self.group_by.is_empty() && entries.is_empty() {
-            // Global aggregation: a single output row, even over zero rows.
-            entries.push((Vec::new(), self.new_accumulators()));
-        }
-        // Stable, deterministic output order: sorted by group key.
-        entries.sort_by(|(a, _), (b, _)| cmp_keys(a, b));
-
-        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.len());
-        for (gi, _) in self.group_by.iter().enumerate() {
-            let dt = self.schema.fields[gi].data_type;
-            let vals: Vec<Scalar> = entries.iter().map(|(k, _)| k[gi].clone()).collect();
-            columns.push(array_from_scalars(dt, &vals));
-        }
-        for (i, _) in self.aggregates.iter().enumerate() {
-            let dt = self.schema.fields[self.group_by.len() + i].data_type;
-            let finished = entries
-                .iter()
-                .map(|(_, accs)| accs[i].finish())
-                .collect::<Result<Vec<_>, _>>()?;
-            columns.push(array_from_scalars(dt, &finished));
-        }
-
-        Ok(vec![Arc::new(Batch::new_unchecked(
-            self.schema.clone(),
-            columns,
-        ))])
-    }
-
-    fn explain(&self, depth: usize, out: &mut String) {
-        let input = self.input.schema();
-        let keys: Vec<&str> = self
-            .group_by
-            .iter()
-            .map(|&i| input.field(i).map_or("?", |f| f.name.as_str()))
-            .collect();
-        let aggs: Vec<&str> = self
-            .aggregates
-            .iter()
-            .map(|a| a.out_name.as_str())
-            .collect();
-        push_line(
-            out,
-            depth,
-            &format!(
-                "Aggregate group_by=[{}] aggs=[{}]",
-                keys.join(", "),
-                aggs.join(", ")
-            ),
-        );
-        self.input.explain(depth + 1, out);
-    }
-}
-
 // === Join ===
 
-/// Inner equi-join (hash join) on one key column per side.
+/// Which rows of an equi-join are kept when they have no match on the other side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinKind {
+    /// Only matched pairs.
+    Inner,
+    /// Every left row; unmatched ones get NULLs on the right.
+    Left,
+    /// Every right row; unmatched ones get NULLs on the left.
+    Right,
+    /// Every row from both sides; unmatched ones get NULLs on the other side.
+    Full,
+}
+
+impl JoinKind {
+    fn keeps_left(self) -> bool {
+        matches!(self, JoinKind::Left | JoinKind::Full)
+    }
+
+    fn keeps_right(self) -> bool {
+        matches!(self, JoinKind::Right | JoinKind::Full)
+    }
+}
+
+/// Equi-join (hash join) on one key column per side.
 ///
 /// Output columns are the left schema followed by the right schema. The two
 /// sides must not share a column name, because the output names must be
-/// unambiguous. Null keys never match.
+/// unambiguous. Null keys never match. Matched rows come first, in left-row
+/// order; unmatched rows of an outer join follow, so output order is not
+/// the input order.
 pub struct JoinExec {
     left: Arc<dyn PhysicalPlan>,
     right: Arc<dyn PhysicalPlan>,
     left_key: usize,
     right_key: usize,
     schema: Arc<Schema>,
+    kind: JoinKind,
 }
 
 impl JoinExec {
@@ -901,7 +574,52 @@ impl JoinExec {
             left_key,
             right_key,
             schema: Arc::new(Schema::new(fields)),
+            kind: JoinKind::Inner,
         })
+    }
+
+    /// As [`JoinExec::try_new`], but with the join kind chosen: `outer` keeps
+    /// unmatched left rows (LEFT JOIN). See [`JoinExec::try_new_join`].
+    pub fn try_new_kind(
+        left: Arc<dyn PhysicalPlan>,
+        right: Arc<dyn PhysicalPlan>,
+        left_key: usize,
+        right_key: usize,
+        outer: bool,
+    ) -> Result<Self, QueryError> {
+        let kind = if outer {
+            JoinKind::Left
+        } else {
+            JoinKind::Inner
+        };
+        Self::try_new_join(left, right, left_key, right_key, kind)
+    }
+
+    /// As [`JoinExec::try_new`], with any [`JoinKind`]. The columns that can be
+    /// NULL-padded for the chosen kind become nullable in the output schema.
+    pub fn try_new_join(
+        left: Arc<dyn PhysicalPlan>,
+        right: Arc<dyn PhysicalPlan>,
+        left_key: usize,
+        right_key: usize,
+        kind: JoinKind,
+    ) -> Result<Self, QueryError> {
+        let mut join = Self::try_new(left, right, left_key, right_key)?;
+        join.kind = kind;
+        let left_width = join.left.schema().len();
+        let mut fields = join.schema.fields.clone();
+        if kind.keeps_left() {
+            for f in fields.iter_mut().skip(left_width) {
+                f.nullable = true;
+            }
+        }
+        if kind.keeps_right() {
+            for f in fields.iter_mut().take(left_width) {
+                f.nullable = true;
+            }
+        }
+        join.schema = Arc::new(Schema::new(fields));
+        Ok(join)
     }
 }
 
@@ -915,13 +633,12 @@ impl PhysicalPlan for JoinExec {
         let right_batches = self.right.execute()?;
 
         // Hash the right side by key, recording (batch, row) positions.
-        let mut index: HashMap<Scalar, Vec<(usize, usize)>> = HashMap::new();
+        // Keys are borrowed from the batches, so string keys are not copied.
+        let mut index: FastMap<KeyPart<'_>, Vec<(usize, usize)>> = FastMap::default();
         for (bi, batch) in right_batches.iter().enumerate() {
             for row in 0..batch.row_count() {
-                let key = batch.columns[self.right_key]
-                    .get(row)
-                    .unwrap_or(Scalar::Null);
-                if matches!(key, Scalar::Null) {
+                let key = key_at(&batch.columns[self.right_key], row);
+                if key == KeyPart::Null {
                     continue;
                 }
                 index.entry(key).or_default().push((bi, row));
@@ -929,18 +646,45 @@ impl PhysicalPlan for JoinExec {
         }
 
         // Probe with the left side, collecting matched positions on both sides.
-        let mut left_pos: Vec<(usize, usize)> = Vec::new();
-        let mut right_pos: Vec<(usize, usize)> = Vec::new();
+        // A `None` position is a row with no match on that side (outer joins).
+        // `right_matched[bi][row]` records which right rows found a partner, so
+        // a RIGHT or FULL join can add the rest afterwards.
+        let mut right_matched: Vec<Vec<bool>> = right_batches
+            .iter()
+            .map(|b| vec![false; b.row_count()])
+            .collect();
+        let mut left_pos: Vec<Option<(usize, usize)>> = Vec::new();
+        let mut right_pos: Vec<Option<(usize, usize)>> = Vec::new();
         for (lbi, lb) in left_batches.iter().enumerate() {
             for row in 0..lb.row_count() {
-                let key = lb.columns[self.left_key].get(row).unwrap_or(Scalar::Null);
-                if matches!(key, Scalar::Null) {
-                    continue;
+                let key = key_at(&lb.columns[self.left_key], row);
+                let hits = if key == KeyPart::Null {
+                    None
+                } else {
+                    index.get(&key)
+                };
+                match hits {
+                    Some(hits) if !hits.is_empty() => {
+                        for &(rbi, rrow) in hits {
+                            right_matched[rbi][rrow] = true;
+                            left_pos.push(Some((lbi, row)));
+                            right_pos.push(Some((rbi, rrow)));
+                        }
+                    }
+                    _ if self.kind.keeps_left() => {
+                        left_pos.push(Some((lbi, row)));
+                        right_pos.push(None);
+                    }
+                    _ => {}
                 }
-                if let Some(hits) = index.get(&key) {
-                    for &(rbi, rrow) in hits {
-                        left_pos.push((lbi, row));
-                        right_pos.push((rbi, rrow));
+            }
+        }
+        if self.kind.keeps_right() {
+            for (rbi, matched_rows) in right_matched.iter().enumerate() {
+                for (row, &matched) in matched_rows.iter().enumerate() {
+                    if !matched {
+                        left_pos.push(None);
+                        right_pos.push(Some((rbi, row)));
                     }
                 }
             }
@@ -950,11 +694,11 @@ impl PhysicalPlan for JoinExec {
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.len());
         for c in 0..left_width {
             let dt = self.schema.fields[c].data_type;
-            columns.push(gather(&left_batches, c, &left_pos, dt));
+            columns.push(gather_opt(&left_batches, c, left_pos.iter().copied(), dt));
         }
         for c in 0..self.right.schema().len() {
             let dt = self.schema.fields[left_width + c].data_type;
-            columns.push(gather(&right_batches, c, &right_pos, dt));
+            columns.push(gather_opt(&right_batches, c, right_pos.iter().copied(), dt));
         }
 
         Ok(vec![Arc::new(Batch::new_unchecked(
@@ -974,7 +718,13 @@ impl PhysicalPlan for JoinExec {
             .schema()
             .field(self.right_key)
             .map_or("?", |f| f.name.as_str());
-        push_line(out, depth, &format!("HashJoin on {lname} = {rname}"));
+        let kind = match self.kind {
+            JoinKind::Inner => "",
+            JoinKind::Left => "Left ",
+            JoinKind::Right => "Right ",
+            JoinKind::Full => "Full ",
+        };
+        push_line(out, depth, &format!("{kind}HashJoin on {lname} = {rname}"));
         self.left.explain(depth + 1, out);
         self.right.explain(depth + 1, out);
     }
@@ -1025,13 +775,14 @@ impl PhysicalPlan for SortExec {
             .collect();
 
         // Extract each sort key once, so comparisons do not re-read arrays.
-        let keys: Vec<Vec<Scalar>> = self
+        // Typed keys borrowed from the batches; NULL sorts first, as before.
+        let keys: Vec<Vec<KeyPart<'_>>> = self
             .sort_exprs
             .iter()
             .map(|se| {
                 positions
                     .iter()
-                    .map(|&(b, r)| batches[b].columns[se.column].get(r).unwrap_or(Scalar::Null))
+                    .map(|&(b, r)| key_at(&batches[b].columns[se.column], r))
                     .collect()
             })
             .collect();
@@ -1041,7 +792,7 @@ impl PhysicalPlan for SortExec {
             for (k, se) in self.sort_exprs.iter().enumerate() {
                 // `sort_cmp` gives NULL a deterministic position (first when
                 // ascending) instead of comparing it equal to non-null values.
-                let ord = sort_cmp(&keys[k][a], &keys[k][b]);
+                let ord = keys[k][a].cmp(&keys[k][b]);
                 let ord = if se.desc { ord.reverse() } else { ord };
                 if ord != Ordering::Equal {
                     return ord;
@@ -1113,15 +864,20 @@ impl PhysicalPlan for LimitExec {
         &self.schema
     }
 
-    fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
-        let batches = self.input.execute()?;
-        let mut out = Vec::new();
+    fn open(&self) -> Result<BatchStream, QueryError> {
+        let mut input = self.input.open()?;
+        let schema = self.schema.clone();
         let mut to_skip = self.offset;
         let mut remaining = self.n;
-        for batch in batches {
+        Ok(Box::new(std::iter::from_fn(move || loop {
+            // Once the limit is met, stop without pulling from the input again.
             if remaining == 0 {
-                break;
+                return None;
             }
+            let batch = match input.next()? {
+                Ok(batch) => batch,
+                Err(e) => return Some(Err(e)),
+            };
             let rows = batch.row_count();
             let skip = to_skip.min(rows);
             to_skip -= skip;
@@ -1132,17 +888,12 @@ impl PhysicalPlan for LimitExec {
             let take = available.min(remaining);
             remaining -= take;
             if skip == 0 && take == rows {
-                out.push(batch);
-                continue;
+                return Some(Ok(batch));
             }
             let indices: Vec<usize> = (skip..skip + take).collect();
-            let columns = batch.columns.iter().map(|c| c.take(&indices)).collect();
-            out.push(Arc::new(Batch::new_unchecked(self.schema.clone(), columns)));
-        }
-        if out.is_empty() {
-            out.push(empty_batch(&self.schema));
-        }
-        Ok(out)
+            let columns: Vec<ArrayRef> = batch.columns.iter().map(|c| c.take(&indices)).collect();
+            return Some(Ok(Arc::new(Batch::new_unchecked(schema.clone(), columns))));
+        })))
     }
 
     fn explain(&self, depth: usize, out: &mut String) {
@@ -1151,6 +902,86 @@ impl PhysicalPlan for LimitExec {
             depth,
             &format!("Limit {} offset {}", self.n, self.offset),
         );
+        self.input.explain(depth + 1, out);
+    }
+}
+
+// === Conditions (AND / OR over comparisons) ===
+
+/// A boolean condition over the columns of one batch: a comparison with a
+/// literal, a comparison between two columns, or an AND/OR of conditions.
+///
+/// There is no NOT, so a comparison that is unknown (NULL) can be treated as
+/// false when filtering. That gives the same rows as SQL's three-valued logic.
+#[derive(Debug, Clone)]
+pub enum Condition {
+    Cmp(Predicate),
+    ColCmp {
+        left: usize,
+        op: Comparison,
+        right: usize,
+    },
+    And(Vec<Condition>),
+    Or(Vec<Condition>),
+}
+
+impl Condition {
+    /// Whether `row` of `batch` satisfies the condition.
+    pub fn matches(&self, batch: &Batch, row: usize) -> bool {
+        match self {
+            Condition::Cmp(p) => p.matches(batch, row),
+            Condition::ColCmp { left, op, right } => {
+                let a = batch.columns.get(*left).and_then(|c| c.get(row));
+                let b = batch.columns.get(*right).and_then(|c| c.get(row));
+                match (a, b) {
+                    (Some(a), Some(b)) => compare_values(&a, &b, *op),
+                    _ => false,
+                }
+            }
+            Condition::And(parts) => parts.iter().all(|c| c.matches(batch, row)),
+            Condition::Or(parts) => parts.iter().any(|c| c.matches(batch, row)),
+        }
+    }
+}
+
+/// Keep the rows of its input that satisfy a [`Condition`].
+pub struct CondFilterExec {
+    input: Arc<dyn PhysicalPlan>,
+    condition: Condition,
+    schema: Arc<Schema>,
+}
+
+impl CondFilterExec {
+    pub fn new(input: Arc<dyn PhysicalPlan>, condition: Condition) -> Self {
+        let schema = Arc::new(input.schema().clone());
+        Self {
+            input,
+            condition,
+            schema,
+        }
+    }
+}
+
+impl PhysicalPlan for CondFilterExec {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn open(&self) -> Result<BatchStream, QueryError> {
+        let condition = self.condition.clone();
+        let schema = self.schema.clone();
+        Ok(Box::new(self.input.open()?.map(move |batch| {
+            let batch = batch?;
+            let keep: Vec<usize> = (0..batch.row_count())
+                .filter(|&row| condition.matches(&batch, row))
+                .collect();
+            let columns: Vec<ArrayRef> = batch.columns.iter().map(|c| c.take(&keep)).collect();
+            Ok(Arc::new(Batch::new_unchecked(schema.clone(), columns)))
+        })))
+    }
+
+    fn explain(&self, depth: usize, out: &mut String) {
+        push_line(out, depth, "Filter (AND/OR condition)");
         self.input.explain(depth + 1, out);
     }
 }

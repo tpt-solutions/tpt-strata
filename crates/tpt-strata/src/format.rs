@@ -236,9 +236,25 @@ impl Table {
         let batches = self
             .batches
             .iter()
-            .map(|b| Arc::new(Batch::new_unchecked(schema.clone(), b.columns.clone())))
+            .map(|b| Arc::new(Batch::new_shared(schema.clone(), b.columns.clone())))
             .collect();
         Ok(Table::from_shared_batches(schema, batches))
+    }
+
+    /// A table with only the columns at `idx`, in that order. The columns are
+    /// shared, not copied.
+    pub(crate) fn select_columns(&self, idx: &[usize]) -> Table {
+        let fields: Vec<Field> = idx.iter().map(|&i| self.schema.fields[i].clone()).collect();
+        let schema = Arc::new(Schema::new(fields));
+        let batches = self
+            .batches
+            .iter()
+            .map(|b| {
+                let cols = idx.iter().map(|&i| b.columns[i].clone()).collect();
+                Arc::new(Batch::new_shared(schema.clone(), cols))
+            })
+            .collect();
+        Table::from_shared_batches(schema, batches)
     }
 
     /// Concatenate two tables with the same column names and types.

@@ -10,26 +10,27 @@ All three engines return the same results on all three queries. Every
 engine's output was checked against tpt-strata's (row count, numeric sum, and
 text length).
 
-**tpt-strata is slower on these analytic queries.** On one thread it is about
-10–40× slower than DataFusion on one thread and 4–20× slower than DuckDB on one
-thread. The gap is largest on the join and the group-by. It narrows only
-against DuckDB on the join, where DuckDB is also single-threaded.
+On one thread, tpt-strata is slower than both other engines on these queries.
+DataFusion is about 4–13× faster and DuckDB is about 1.5–16× faster. The
+largest gap is on the join, where tpt-strata is about 11× slower than
+DataFusion and 16× slower than DuckDB. On the group-by, tpt-strata is close to
+DuckDB and about 4× slower than DataFusion.
 
 Query times, 1,000,000 rows, median of 5 runs after one warm-up:
 
 | query | tpt-strata (1 thread) | DataFusion (1 partition) | DataFusion (20 cores) | DuckDB (1 thread) | DuckDB (20 threads) |
 |---|---|---|---|---|---|
-| Q1 group by, SUM, AVG, COUNT | 107.4 ms | 8.06 ms | 3.83 ms | 22.4 ms | 6.76 ms |
-| Q2 filter, sort, limit 100 | 68.5 ms | 4.20 ms | 2.61 ms | 13.7 ms | 3.30 ms |
-| Q3 join to 1,000 rows, group by | 268.8 ms | 9.44 ms | 4.27 ms | 5.87 ms | 4.55 ms |
+| Q1 group by, SUM, AVG, COUNT | 34.7 ms | 8.50 ms | 4.22 ms | 23.4 ms | 7.48 ms |
+| Q2 filter, sort, limit 100 | 53.7 ms | 4.20 ms | 2.01 ms | 13.1 ms | 3.80 ms |
+| Q3 join to 1,000 rows, group by | 103.7 ms | 9.39 ms | 4.41 ms | 6.62 ms | 5.69 ms |
 
 Load (read the Parquet file into each engine's format, single run):
 
 | engine | load |
 |---|---|
-| tpt-strata (1 thread) | 101 ms |
-| DataFusion (1 partition / 20) | 37 ms / 32 ms |
-| DuckDB (1 thread / 20) | 118 ms / 117 ms |
+| tpt-strata (1 thread) | 104 ms |
+| DataFusion (1 partition / 20) | 38 ms / 32 ms |
+| DuckDB (1 thread / 20) | 121 ms / 117 ms |
 
 Cost of the dependencies, measured on the whole benchmark:
 
@@ -43,20 +44,35 @@ Cost of the dependencies, measured on the whole benchmark:
 These cover all three engines together. Per-engine dependency counts are not
 measured here.
 
+## History of tpt-strata's numbers
+
+The same query, Q1, measured at each stage of the work:
+
+| stage | Q1 | Q2 | Q3 |
+|---|---|---|---|
+| first measurement (boxed `Scalar` values everywhere) | 107 ms | 68 ms | 269 ms |
+| typed group keys and accumulators, typed filter, typed sort and join keys, Fx-style hasher | 33 ms | 55 ms | 178 ms |
+| shared (`Arc`) column storage and column pruning before joins | 31–35 ms | 49–54 ms | 101–104 ms |
+
+Q2 sorts roughly 200,000 rows after its filter (an estimate from the data
+distribution). The sort has not been profiled on its own, so the next step is
+to profile it before changing it.
+
 ## What this says
 
-- **For the analytic workload, tpt-strata does not compete on speed.** The
-  engine works one row at a time through `Scalar` values. The DataFusion and
-  DuckDB engines process columns in vectorised kernels, which is where the gap
-  comes from. The earlier internal numbers (about 100 ns per row for GROUP BY)
-  match Q1 here, and DataFusion's vectorised path runs at about 8 ns per row.
-- **What tpt-strata offers is elsewhere.** Zero dependencies in the core crate,
-  a core crate with zero dependencies that builds in seconds, integrations for
-  Rust, Python, WebAssembly and serde, and errors that name
-  the caller's columns. Those are the reasons to choose it, and they are not
-  measured by this benchmark.
-- **The planned typed hot paths (Phase 12 in `todo.md`) address this gap.** They
-  are not done. Until they are, this document is the honest baseline.
+- **For analytic queries on one thread, tpt-strata is not competitive on speed
+  yet.** It processes values through typed keys and accumulators, but the
+  engine still works one row at a time within each operator. DataFusion and
+  DuckDB process columns in vectorised kernels.
+- **What tpt-strata offers is elsewhere.** A core crate with zero dependencies
+  that builds in seconds, integrations for Rust, Python, WebAssembly and serde,
+  and errors that name the caller's columns. Those are the reasons to choose it,
+  and this benchmark does not measure them.
+- **Remaining work** is in `todo.md` under Phase 12. Vectorised filter kernels
+  and an index-based sort are not done. String columns still copy their values
+  when a result is built, because strings are stored as `String` values. Moving
+  strings to an offset buffer is a likely next step; the cost has not been
+  measured on its own.
 
 ## Method
 

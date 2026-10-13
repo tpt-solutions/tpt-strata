@@ -84,27 +84,43 @@ impl ArrayRef {
         }
     }
 
-    /// Select the rows at `indices`, preserving order.
+    /// Select the rows at `indices`, preserving order. An out-of-range index
+    /// yields NULL.
     pub fn take(&self, indices: &[usize]) -> Self {
         match self {
             ArrayRef::Boolean(a) => {
-                let vals = indices.iter().map(|&i| a.0[i]).collect();
+                let vals = indices
+                    .iter()
+                    .map(|&i| a.0.get(i).copied().flatten())
+                    .collect();
                 ArrayRef::Boolean(BoolArray(vals))
             }
             ArrayRef::Int32(a) => {
-                let vals = indices.iter().map(|&i| a.0[i]).collect();
+                let vals = indices
+                    .iter()
+                    .map(|&i| a.0.get(i).copied().flatten())
+                    .collect();
                 ArrayRef::Int32(I32Array(vals))
             }
             ArrayRef::Int64(a) => {
-                let vals = indices.iter().map(|&i| a.0[i]).collect();
+                let vals = indices
+                    .iter()
+                    .map(|&i| a.0.get(i).copied().flatten())
+                    .collect();
                 ArrayRef::Int64(I64Array(vals))
             }
             ArrayRef::Float64(a) => {
-                let vals = indices.iter().map(|&i| a.0[i]).collect();
+                let vals = indices
+                    .iter()
+                    .map(|&i| a.0.get(i).copied().flatten())
+                    .collect();
                 ArrayRef::Float64(F64Array(vals))
             }
             ArrayRef::Utf8(a) => {
-                let vals = indices.iter().map(|&i| a.0[i].clone()).collect();
+                let vals = indices
+                    .iter()
+                    .map(|&i| a.0.get(i).cloned().flatten())
+                    .collect();
                 ArrayRef::Utf8(StrArray(vals))
             }
         }

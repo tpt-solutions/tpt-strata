@@ -310,7 +310,7 @@ pub fn write_parquet(table: &Table, path: impl AsRef<Path>) -> Result<(), QueryE
     let mut writer = ArrowWriter::try_new(file, schema.clone(), None)
         .map_err(|e| import_err(format!("cannot start Parquet writer for '{display}': {e}")))?;
     for batch in table.batches() {
-        let columns: Vec<ArrowArrayRef> = batch.columns.iter().map(to_arrow).collect();
+        let columns: Vec<ArrowArrayRef> = batch.columns.iter().map(|c| to_arrow(c)).collect();
         let record = RecordBatch::try_new(schema.clone(), columns)
             .map_err(|e| import_err(format!("cannot build Arrow batch: {e}")))?;
         writer

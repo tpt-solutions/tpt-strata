@@ -1,0 +1,12 @@
+[package]
+name = "phase0-polars"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Phase 0 comparison sketch: the same employee case on Polars, for validation-memo.md"
+
+# A standalone workspace, so Polars never joins the tpt-strata workspace.
+[workspace]
+
+[dependencies]
+polars = { version = "0.55", default-features = false, features = ["lazy", "sql", "fmt"] }

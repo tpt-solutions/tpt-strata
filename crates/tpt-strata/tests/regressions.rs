@@ -675,7 +675,7 @@ fn error_kind_is_stable_and_machine_readable() {
     assert_eq!(missing.kind(), "missing-column");
     let sql = run(&t, "SELECT name FROM people WHERE name =").unwrap_err();
     assert_eq!(sql.kind(), "sql");
-    let unsupported = run(&t, "SELECT name FROM people WHERE name IN ('a')").unwrap_err();
+    let unsupported = run(&t, "SELECT name FROM people WHERE NOT").unwrap_err();
     assert_eq!(unsupported.kind(), "sql");
 }
 
@@ -700,4 +700,41 @@ fn unicode_values_align_by_character_count() {
         .map(|l| l.chars().count())
         .collect();
     assert!(widths.windows(2).all(|w| w[0] == w[1]), "{text}");
+}
+
+// --- leftover review fixes ---
+
+#[test]
+fn minimum_i64_literal_is_accepted_only_after_a_minus_sign() {
+    let t = Table::try_new(vec![Column::new(
+        "v",
+        vec![Scalar::I64(i64::MIN), Scalar::I64(0)],
+    )])
+    .unwrap();
+    let mut ctx = SqlContext::new();
+    ctx.add_table("t", &t);
+    let out = ctx
+        .run("SELECT v FROM t WHERE v = -9223372036854775808")
+        .unwrap();
+    assert_eq!(out.row_count(), 1);
+    let err = ctx
+        .run("SELECT v FROM t WHERE v = 9223372036854775808")
+        .unwrap_err();
+    assert!(err.to_string().contains("out of range"), "{err}");
+}
+
+#[test]
+fn take_out_of_range_yields_null_not_a_panic() {
+    use tpt_strata::{ArrayRef, I64Array};
+    let arr = ArrayRef::Int64(I64Array::new(vec![10, 20]));
+    let taken = arr.take(&[1, 9]);
+    assert_eq!(taken.get(0), Some(Scalar::I64(20)));
+    assert_eq!(taken.get(1), None);
+}
+
+#[test]
+fn whole_floats_display_with_a_decimal_point() {
+    assert_eq!(Scalar::F64(100.0).to_string(), "100.0");
+    assert_eq!(Scalar::I64(100).to_string(), "100");
+    assert_eq!(Scalar::F64(2.5).to_string(), "2.5");
 }

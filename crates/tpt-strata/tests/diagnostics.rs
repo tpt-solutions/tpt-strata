@@ -140,30 +140,43 @@ fn snapshot_group_by_validation() {
 // rather than a generic parse error. The wording prefix is pinned below.
 
 #[test]
-fn snapshot_v1_1_or_in_where() {
-    let err = ctx()
-        .run("SELECT * FROM employees WHERE salary > 1 OR years < 2")
-        .unwrap_err();
-    let text = err.to_string();
-    assert!(
-        text.contains("'OR in WHERE' is not supported in tpt-strata v1.1")
-            && text.contains("combine predicates with AND only")
-            && text.contains("docs/v1.1-scope.md"),
-        "unexpected diagnostic: {text}"
-    );
+fn or_and_parentheses_in_where_are_supported() {
+    // The fixture has two rows: eng (salary 100000, years 5) and sales (80000, 3).
+    let out = ctx()
+        .run("SELECT department FROM employees WHERE salary > 1 OR years < 2")
+        .unwrap();
+    assert_eq!(out.row_count(), 2);
+    let out = ctx()
+        .run("SELECT department FROM employees WHERE (salary > 1 OR years < 2) AND department = 'eng'")
+        .unwrap();
+    assert_eq!(out.row_count(), 1);
 }
 
 #[test]
-fn snapshot_v1_1_in_where_still_rejected() {
-    // IN needs OR-style boolean logic, which is still outside the v1.1 subset.
+fn in_list_in_where_is_supported() {
+    let out = ctx()
+        .run("SELECT department FROM employees WHERE department IN ('eng', 'hr')")
+        .unwrap();
+    assert_eq!(out.row_count(), 1);
+}
+
+#[test]
+fn column_to_column_comparison_is_supported() {
+    let out = ctx()
+        .run("SELECT department FROM employees WHERE salary > years")
+        .unwrap();
+    assert_eq!(out.row_count(), 2);
+}
+
+#[test]
+fn comparing_a_text_column_with_a_number_column_names_both() {
     let err = ctx()
-        .run("SELECT * FROM employees WHERE years IN (1, 2)")
+        .run("SELECT department FROM employees WHERE department = years")
         .unwrap_err();
-    let text = err.to_string();
     assert!(
-        text.contains("'IN (...)' is not supported in tpt-strata v1.1")
-            && text.contains("docs/v1.1-scope.md"),
-        "unexpected diagnostic: {text}"
+        err.to_string()
+            .contains("cannot compare 'department' (str) with 'years' (i32)"),
+        "{err}"
     );
 }
 
@@ -179,32 +192,6 @@ fn is_null_between_and_like_in_where_are_supported() {
         .unwrap();
     c.run("SELECT * FROM employees WHERE department LIKE 'e%'")
         .unwrap();
-}
-
-#[test]
-fn snapshot_v1_1_parens_in_where() {
-    let err = ctx()
-        .run("SELECT * FROM employees WHERE (years = 1 OR salary > 0)")
-        .unwrap_err();
-    let text = err.to_string();
-    assert!(
-        text.contains("parenthesized expressions / operator precedence")
-            && text.contains("docs/v1.1-scope.md"),
-        "unexpected diagnostic: {text}"
-    );
-}
-
-#[test]
-fn snapshot_v1_1_column_to_column_comparison() {
-    let err = ctx()
-        .run("SELECT * FROM employees WHERE salary = years")
-        .unwrap_err();
-    let text = err.to_string();
-    assert!(
-        text.contains("column-to-column comparisons are not supported")
-            && text.contains("compare 'salary' against a literal instead"),
-        "unexpected diagnostic: {text}"
-    );
 }
 
 #[test]
@@ -229,16 +216,12 @@ fn having_filters_aggregates() {
 }
 
 #[test]
-fn snapshot_v1_1_left_and_multiple_joins() {
-    for sql in [
-        "SELECT * FROM employees LEFT JOIN t ON employees.department = t.name",
-        "SELECT * FROM employees JOIN t ON employees.department = t.name JOIN t2 ON t.name = t2.name",
-    ] {
-        let err = ctx().run(sql).unwrap_err();
-        let text = err.to_string();
-        assert!(
-            text.contains("is not supported in tpt-strata v1.1") && text.contains("equi-join"),
-            "unexpected diagnostic for {sql}: {text}"
-        );
-    }
+fn cast_is_still_rejected_with_a_targeted_message() {
+    let err = ctx()
+        .run("SELECT CAST(salary AS TEXT) FROM employees")
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported cast"),
+        "unexpected diagnostic: {err}"
+    );
 }
