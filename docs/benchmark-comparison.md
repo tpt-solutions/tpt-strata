@@ -237,3 +237,18 @@ filter still run on one thread.
 
 Integer results are exact in both modes. Float `SUM` and `AVG` can differ in
 the last bit between the modes, because the addition order changes.
+
+### Phase 15, validity bitmaps (one thread, 1M rows)
+
+Columns store values plus an optional validity vector. A column with no NULLs
+stores no validity. Numeric columns are half the size they were.
+
+| | Before | After |
+|---|---|---|
+| Parquet load | 101.6 ms | 71–73 ms |
+| Q1 group by + 3 aggregates | 27.3 ms | 25.7–29.2 ms |
+| Q2 filter + sort + limit | 14.8 ms | 13.6–15.1 ms |
+| Q3 join + group by | 52.6 ms | 65.3–65.5 ms (regression) |
+
+Q3 regressed on the Parquet-loaded tables; the same join in memory is at the
+earlier time (58 ms against 57 ms). The cause is not yet identified.

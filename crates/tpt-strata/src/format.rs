@@ -300,7 +300,7 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
                     _ => None,
                 })
                 .collect();
-            Ok(ArrayRef::Boolean(BoolArray(v)))
+            Ok(ArrayRef::Boolean(BoolArray::from_nulls(v)))
         }
         DataType::Int32 => {
             let v: Vec<Option<i32>> = values
@@ -310,7 +310,7 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
                     _ => None,
                 })
                 .collect();
-            Ok(ArrayRef::Int32(I32Array(v)))
+            Ok(ArrayRef::Int32(I32Array::from_nulls(v)))
         }
         DataType::Int64 => {
             let v: Vec<Option<i64>> = values
@@ -320,7 +320,7 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
                     _ => None,
                 })
                 .collect();
-            Ok(ArrayRef::Int64(I64Array(v)))
+            Ok(ArrayRef::Int64(I64Array::from_nulls(v)))
         }
         DataType::Float64 => {
             let v: Vec<Option<f64>> = values
@@ -330,7 +330,7 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
                     _ => None,
                 })
                 .collect();
-            Ok(ArrayRef::Float64(F64Array(v)))
+            Ok(ArrayRef::Float64(F64Array::from_nulls(v)))
         }
         DataType::Utf8 => {
             let v: Vec<Option<String>> = values
@@ -344,7 +344,7 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
                 .into_iter()
                 .map(|s| s.map(std::sync::Arc::<str>::from))
                 .collect();
-            Ok(ArrayRef::Utf8(StrArray(v)))
+            Ok(ArrayRef::Utf8(StrArray::from_nulls(v)))
         }
         DataType::Date => {
             let v: Vec<Option<i32>> = values
@@ -354,7 +354,7 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
                     _ => None,
                 })
                 .collect();
-            Ok(ArrayRef::Date(I32Array(v)))
+            Ok(ArrayRef::Date(I32Array::from_nulls(v)))
         }
         DataType::Timestamp => {
             let v: Vec<Option<i64>> = values
@@ -364,7 +364,7 @@ fn value_to_array(data_type: DataType, values: &[Scalar]) -> Result<ArrayRef, Qu
                     _ => None,
                 })
                 .collect();
-            Ok(ArrayRef::Timestamp(I64Array(v)))
+            Ok(ArrayRef::Timestamp(I64Array::from_nulls(v)))
         }
     }
 }

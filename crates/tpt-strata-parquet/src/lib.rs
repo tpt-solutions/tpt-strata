@@ -34,6 +34,7 @@ use arrow::array::{
     Array, ArrayRef as ArrowArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array,
     Int64Array, StringArray, TimestampMicrosecondArray,
 };
+use arrow::buffer::NullBuffer;
 use arrow::compute::cast;
 use arrow::datatypes::{
     DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema, TimeUnit,
@@ -94,85 +95,129 @@ fn import_target(dt: &ArrowType) -> Option<(DataType, ArrowType)> {
     })
 }
 
+/// One column being collected: its values, and the validity of each value
+/// when the column has any NULL. `valid` is `None` for a column without NULLs.
+struct Buf<T> {
+    values: Vec<T>,
+    valid: Option<Vec<bool>>,
+}
+
+impl<T: Clone> Buf<T> {
+    fn new() -> Self {
+        Self {
+            values: Vec::new(),
+            valid: None,
+        }
+    }
+
+    /// Append `values`. `nulls` is the Arrow validity of those values, and
+    /// `null` is the placeholder stored where a value is NULL.
+    fn extend(&mut self, values: &[T], nulls: Option<&NullBuffer>, null: &T) {
+        match nulls {
+            None => {
+                if let Some(valid) = self.valid.as_mut() {
+                    valid.resize(self.values.len() + values.len(), true);
+                }
+                self.values.extend_from_slice(values);
+            }
+            Some(nulls) => {
+                let valid = self
+                    .valid
+                    .get_or_insert_with(|| vec![true; self.values.len()]);
+                for (i, v) in values.iter().enumerate() {
+                    let ok = nulls.is_valid(i);
+                    valid.push(ok);
+                    self.values.push(if ok { v.clone() } else { null.clone() });
+                }
+            }
+        }
+    }
+
+    /// Append one value that may be NULL.
+    fn push(&mut self, ok: bool, v: T, null: &T) {
+        if !ok && self.valid.is_none() {
+            self.valid = Some(vec![true; self.values.len()]);
+        }
+        if let Some(valid) = self.valid.as_mut() {
+            valid.push(ok);
+        }
+        self.values.push(if ok { v } else { null.clone() });
+    }
+}
+
 enum Collector {
-    Bool(Vec<Option<bool>>),
-    I32(Vec<Option<i32>>),
-    I64(Vec<Option<i64>>),
-    F64(Vec<Option<f64>>),
-    Str(Vec<Option<std::sync::Arc<str>>>),
-    Date(Vec<Option<i32>>),
-    Timestamp(Vec<Option<i64>>),
+    Bool(Buf<bool>),
+    I32(Buf<i32>),
+    I64(Buf<i64>),
+    F64(Buf<f64>),
+    Str(Buf<std::sync::Arc<str>>),
+    Date(Buf<i32>),
+    Timestamp(Buf<i64>),
 }
 
 impl Collector {
     fn new(dt: DataType) -> Self {
         match dt {
-            DataType::Boolean => Collector::Bool(Vec::new()),
-            DataType::Int32 => Collector::I32(Vec::new()),
-            DataType::Int64 => Collector::I64(Vec::new()),
-            DataType::Float64 => Collector::F64(Vec::new()),
-            DataType::Utf8 => Collector::Str(Vec::new()),
-            DataType::Date => Collector::Date(Vec::new()),
-            DataType::Timestamp => Collector::Timestamp(Vec::new()),
+            DataType::Boolean => Collector::Bool(Buf::new()),
+            DataType::Int32 => Collector::I32(Buf::new()),
+            DataType::Int64 => Collector::I64(Buf::new()),
+            DataType::Float64 => Collector::F64(Buf::new()),
+            DataType::Utf8 => Collector::Str(Buf::new()),
+            DataType::Date => Collector::Date(Buf::new()),
+            DataType::Timestamp => Collector::Timestamp(Buf::new()),
         }
     }
 
     /// Append `arr`, which has already been cast to this collector's Arrow type.
     fn push(&mut self, arr: &dyn Array, column: &str) -> Result<(), QueryError> {
         match self {
-            Collector::Bool(v) => {
+            Collector::Bool(b) => {
                 let a = arrow_downcast::<BooleanArray>(arr, column, "BOOLEAN")?;
                 for i in 0..a.len() {
-                    v.push(if a.is_null(i) { None } else { Some(a.value(i)) });
+                    b.push(!a.is_null(i), a.value(i), &false);
                 }
             }
-            Collector::I32(v) => {
+            Collector::I32(b) | Collector::Date(b) => {
                 let a = arrow_downcast::<Int32Array>(arr, column, "INT32")?;
-                for i in 0..a.len() {
-                    v.push(if a.is_null(i) { None } else { Some(a.value(i)) });
-                }
+                b.extend(a.values(), a.nulls(), &0);
             }
-            Collector::I64(v) => {
+            Collector::I64(b) => {
                 let a = arrow_downcast::<Int64Array>(arr, column, "INT64")?;
-                for i in 0..a.len() {
-                    v.push(if a.is_null(i) { None } else { Some(a.value(i)) });
-                }
+                b.extend(a.values(), a.nulls(), &0);
             }
-            Collector::F64(v) => {
-                let a = arrow_downcast::<Float64Array>(arr, column, "DOUBLE")?;
-                for i in 0..a.len() {
-                    v.push(if a.is_null(i) { None } else { Some(a.value(i)) });
-                }
-            }
-            Collector::Str(v) => {
-                let a = arrow_downcast::<StringArray>(arr, column, "STRING")?;
-                // One allocation per distinct value in this batch, not per row.
-                let mut shared: tpt_strata::key::FastMap<&str, std::sync::Arc<str>> =
-                    Default::default();
-                for i in 0..a.len() {
-                    v.push(if a.is_null(i) {
-                        None
-                    } else {
-                        let s = a.value(i);
-                        Some(
-                            shared
-                                .entry(s)
-                                .or_insert_with(|| std::sync::Arc::from(s))
-                                .clone(),
-                        )
-                    });
-                }
-            }
-            Collector::Date(v) => {
-                let a = arrow_downcast::<Int32Array>(arr, column, "DATE")?;
-                for i in 0..a.len() {
-                    v.push(if a.is_null(i) { None } else { Some(a.value(i)) });
-                }
-            }
-            Collector::Timestamp(v) => {
+            Collector::Timestamp(b) => {
                 let a = arrow_downcast::<TimestampMicrosecondArray>(arr, column, "TIMESTAMP")?;
+                b.extend(a.values(), a.nulls(), &0);
+            }
+            Collector::F64(b) => {
+                let a = arrow_downcast::<Float64Array>(arr, column, "DOUBLE")?;
+                b.extend(a.values(), a.nulls(), &0.0);
+            }
+            Collector::Str(b) => {
+                let a = arrow_downcast::<StringArray>(arr, column, "STRING")?;
+                // The distinct values are few in most columns, so a short
+                // linear scan finds a shared `Arc` faster than hashing. Past
+                // 32 distinct values the scan stops growing.
+                const SHARED_CAP: usize = 32;
+                let null: std::sync::Arc<str> = std::sync::Arc::from("");
+                let mut shared: Vec<std::sync::Arc<str>> = Vec::new();
                 for i in 0..a.len() {
-                    v.push(if a.is_null(i) { None } else { Some(a.value(i)) });
+                    if a.is_null(i) {
+                        b.push(false, null.clone(), &null);
+                        continue;
+                    }
+                    let s = a.value(i);
+                    let arc = match shared.iter().find(|x| &***x == s) {
+                        Some(x) => x.clone(),
+                        None => {
+                            let x: std::sync::Arc<str> = std::sync::Arc::from(s);
+                            if shared.len() < SHARED_CAP {
+                                shared.push(x.clone());
+                            }
+                            x
+                        }
+                    };
+                    b.push(true, arc, &null);
                 }
             }
         }
@@ -180,14 +225,38 @@ impl Collector {
     }
 
     fn finish(self) -> ArrayRef {
+        fn parts<T>(b: Buf<T>) -> (Vec<T>, Option<Vec<bool>>) {
+            (b.values, b.valid)
+        }
         match self {
-            Collector::Bool(v) => tpt_strata::BoolArray::from_nulls(v).into(),
-            Collector::I32(v) => tpt_strata::I32Array::from_nulls(v).into(),
-            Collector::I64(v) => tpt_strata::I64Array::from_nulls(v).into(),
-            Collector::F64(v) => tpt_strata::F64Array::from_nulls(v).into(),
-            Collector::Str(v) => tpt_strata::StrArray::from_nulls(v).into(),
-            Collector::Date(v) => ArrayRef::Date(tpt_strata::I32Array::from_nulls(v)),
-            Collector::Timestamp(v) => ArrayRef::Timestamp(tpt_strata::I64Array::from_nulls(v)),
+            Collector::Bool(b) => {
+                let (v, valid) = parts(b);
+                tpt_strata::BoolArray::from_parts(v, valid).into()
+            }
+            Collector::I32(b) => {
+                let (v, valid) = parts(b);
+                tpt_strata::I32Array::from_parts(v, valid).into()
+            }
+            Collector::I64(b) => {
+                let (v, valid) = parts(b);
+                tpt_strata::I64Array::from_parts(v, valid).into()
+            }
+            Collector::F64(b) => {
+                let (v, valid) = parts(b);
+                tpt_strata::F64Array::from_parts(v, valid).into()
+            }
+            Collector::Str(b) => {
+                let (v, valid) = parts(b);
+                tpt_strata::StrArray::from_parts(v, valid).into()
+            }
+            Collector::Date(b) => {
+                let (v, valid) = parts(b);
+                ArrayRef::Date(tpt_strata::I32Array::from_parts(v, valid))
+            }
+            Collector::Timestamp(b) => {
+                let (v, valid) = parts(b);
+                ArrayRef::Timestamp(tpt_strata::I64Array::from_parts(v, valid))
+            }
         }
     }
 }
@@ -368,15 +437,15 @@ fn arrow_type(dt: DataType) -> ArrowType {
 
 fn to_arrow(col: &ArrayRef) -> ArrowArrayRef {
     match col {
-        ArrayRef::Boolean(a) => Arc::new(BooleanArray::from(a.0.clone())),
-        ArrayRef::Int32(a) => Arc::new(Int32Array::from(a.0.clone())),
-        ArrayRef::Int64(a) => Arc::new(Int64Array::from(a.0.clone())),
-        ArrayRef::Float64(a) => Arc::new(Float64Array::from(a.0.clone())),
+        ArrayRef::Boolean(a) => Arc::new(BooleanArray::from(a.to_options())),
+        ArrayRef::Int32(a) => Arc::new(Int32Array::from(a.to_options())),
+        ArrayRef::Int64(a) => Arc::new(Int64Array::from(a.to_options())),
+        ArrayRef::Float64(a) => Arc::new(Float64Array::from(a.to_options())),
         ArrayRef::Utf8(a) => {
-            let values: Vec<Option<&str>> = a.0.iter().map(|s| s.as_deref()).collect();
+            let values: Vec<Option<&str>> = a.iter_values().map(|s| s.map(|v| &**v)).collect();
             Arc::new(StringArray::from(values))
         }
-        ArrayRef::Date(a) => Arc::new(Date32Array::from(a.0.clone())),
-        ArrayRef::Timestamp(a) => Arc::new(TimestampMicrosecondArray::from(a.0.clone())),
+        ArrayRef::Date(a) => Arc::new(Date32Array::from(a.to_options())),
+        ArrayRef::Timestamp(a) => Arc::new(TimestampMicrosecondArray::from(a.to_options())),
     }
 }

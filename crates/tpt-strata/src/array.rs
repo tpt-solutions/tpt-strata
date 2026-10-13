@@ -93,68 +93,22 @@ impl ArrayRef {
             ArrayRef::Int64(a) => a.get(i),
             ArrayRef::Float64(a) => a.get(i),
             ArrayRef::Utf8(a) => a.get(i),
-            ArrayRef::Date(a) => match a.get(i) {
-                Some(Scalar::I32(v)) => Some(Scalar::Date(v)),
-                _ => None,
-            },
-            ArrayRef::Timestamp(a) => match a.get(i) {
-                Some(Scalar::I64(v)) => Some(Scalar::Timestamp(v)),
-                _ => None,
-            },
+            ArrayRef::Date(a) => a.value(i).map(Scalar::Date),
+            ArrayRef::Timestamp(a) => a.value(i).map(Scalar::Timestamp),
         }
     }
 
-    /// Select the rows at `indices`, preserving order. An out-of-range index
-    /// yields NULL.
+    /// A new array of the elements at `indices`, in that order. An index past
+    /// the end gives a NULL.
     pub fn take(&self, indices: &[usize]) -> Self {
         match self {
-            ArrayRef::Boolean(a) => {
-                let vals = indices
-                    .iter()
-                    .map(|&i| a.0.get(i).copied().flatten())
-                    .collect();
-                ArrayRef::Boolean(BoolArray(vals))
-            }
-            ArrayRef::Int32(a) => {
-                let vals = indices
-                    .iter()
-                    .map(|&i| a.0.get(i).copied().flatten())
-                    .collect();
-                ArrayRef::Int32(I32Array(vals))
-            }
-            ArrayRef::Int64(a) => {
-                let vals = indices
-                    .iter()
-                    .map(|&i| a.0.get(i).copied().flatten())
-                    .collect();
-                ArrayRef::Int64(I64Array(vals))
-            }
-            ArrayRef::Float64(a) => {
-                let vals = indices
-                    .iter()
-                    .map(|&i| a.0.get(i).copied().flatten())
-                    .collect();
-                ArrayRef::Float64(F64Array(vals))
-            }
-            ArrayRef::Date(a) => ArrayRef::Date(I32Array(
-                indices
-                    .iter()
-                    .map(|&i| a.0.get(i).copied().flatten())
-                    .collect(),
-            )),
-            ArrayRef::Timestamp(a) => ArrayRef::Timestamp(I64Array(
-                indices
-                    .iter()
-                    .map(|&i| a.0.get(i).copied().flatten())
-                    .collect(),
-            )),
-            ArrayRef::Utf8(a) => {
-                let vals = indices
-                    .iter()
-                    .map(|&i| a.0.get(i).cloned().flatten())
-                    .collect();
-                ArrayRef::Utf8(StrArray(vals))
-            }
+            ArrayRef::Boolean(a) => ArrayRef::Boolean(a.take(indices)),
+            ArrayRef::Int32(a) => ArrayRef::Int32(a.take(indices)),
+            ArrayRef::Int64(a) => ArrayRef::Int64(a.take(indices)),
+            ArrayRef::Float64(a) => ArrayRef::Float64(a.take(indices)),
+            ArrayRef::Utf8(a) => ArrayRef::Utf8(a.take(indices)),
+            ArrayRef::Date(a) => ArrayRef::Date(a.take(indices)),
+            ArrayRef::Timestamp(a) => ArrayRef::Timestamp(a.take(indices)),
         }
     }
 
@@ -173,29 +127,39 @@ impl ArrayRef {
         }
         Ok(match (self, other) {
             (ArrayRef::Boolean(a), ArrayRef::Boolean(b)) => {
-                let mut vals = a.0.clone();
-                vals.extend_from_slice(&b.0);
-                ArrayRef::Boolean(BoolArray(vals))
+                let mut out = a.clone();
+                out.extend_from(b);
+                ArrayRef::Boolean(out)
             }
             (ArrayRef::Int32(a), ArrayRef::Int32(b)) => {
-                let mut vals = a.0.clone();
-                vals.extend_from_slice(&b.0);
-                ArrayRef::Int32(I32Array(vals))
+                let mut out = a.clone();
+                out.extend_from(b);
+                ArrayRef::Int32(out)
             }
             (ArrayRef::Int64(a), ArrayRef::Int64(b)) => {
-                let mut vals = a.0.clone();
-                vals.extend_from_slice(&b.0);
-                ArrayRef::Int64(I64Array(vals))
+                let mut out = a.clone();
+                out.extend_from(b);
+                ArrayRef::Int64(out)
             }
             (ArrayRef::Float64(a), ArrayRef::Float64(b)) => {
-                let mut vals = a.0.clone();
-                vals.extend_from_slice(&b.0);
-                ArrayRef::Float64(F64Array(vals))
+                let mut out = a.clone();
+                out.extend_from(b);
+                ArrayRef::Float64(out)
             }
             (ArrayRef::Utf8(a), ArrayRef::Utf8(b)) => {
-                let mut vals = a.0.clone();
-                vals.extend_from_slice(&b.0);
-                ArrayRef::Utf8(StrArray(vals))
+                let mut out = a.clone();
+                out.extend_from(b);
+                ArrayRef::Utf8(out)
+            }
+            (ArrayRef::Date(a), ArrayRef::Date(b)) => {
+                let mut out = a.clone();
+                out.extend_from(b);
+                ArrayRef::Date(out)
+            }
+            (ArrayRef::Timestamp(a), ArrayRef::Timestamp(b)) => {
+                let mut out = a.clone();
+                out.extend_from(b);
+                ArrayRef::Timestamp(out)
             }
             _ => unreachable!("data_type equality checked above"),
         })
@@ -229,26 +193,138 @@ impl OwnedValue for std::sync::Arc<str> {
     }
 }
 
+/// One typed column: `values[i]` is the value at `i`, and `valid` says which
+/// values are real. `valid` is `None` when every value is valid, which is
+/// the common case, so such a column stores no validity at all. A NULL keeps
+/// a placeholder in `values`, which is never read.
 macro_rules! impl_array {
-    ($name:ident, $variant:ident, $data_type:expr, $ty:ty, $scalar:ident) => {
+    ($name:ident, $variant:ident, $data_type:expr, $ty:ty, $scalar:ident, $null:expr) => {
         #[derive(Debug, Clone, Default)]
-        pub struct $name(pub Vec<Option<$ty>>);
+        pub struct $name {
+            values: Vec<$ty>,
+            valid: Option<Vec<bool>>,
+        }
 
         impl $name {
+            /// An array with no NULLs.
             pub fn new(values: Vec<$ty>) -> Self {
-                Self(values.into_iter().map(Some).collect())
+                Self {
+                    values,
+                    valid: None,
+                }
             }
 
+            /// An array from values and an optional validity vector (`None` means
+            /// every value is valid). `valid`, when given, is as long as `values`.
+            pub fn from_parts(values: Vec<$ty>, valid: Option<Vec<bool>>) -> Self {
+                debug_assert!(valid.as_ref().map_or(true, |v| v.len() == values.len()));
+                Self { values, valid }
+            }
+
+            /// An array from optional values; `None` is NULL.
             pub fn from_nulls(values: Vec<Option<$ty>>) -> Self {
-                Self(values)
+                // One pass. The validity vector appears at the first NULL, and
+                // every value before it was valid.
+                let mut out = Vec::with_capacity(values.len());
+                let mut valid: Option<Vec<bool>> = None;
+                for v in values {
+                    match v {
+                        Some(x) => {
+                            out.push(x);
+                            if let Some(bits) = valid.as_mut() {
+                                bits.push(true);
+                            }
+                        }
+                        None => {
+                            let bits = valid.get_or_insert_with(|| vec![true; out.len()]);
+                            bits.push(false);
+                            out.push($null);
+                        }
+                    }
+                }
+                Self { values: out, valid }
             }
 
-            pub fn values(&self) -> &[Option<$ty>] {
-                &self.0
+            /// The value at `i`, or `None` if it is NULL or out of range.
+            #[inline]
+            pub fn value_ref(&self, i: usize) -> Option<&$ty> {
+                if self.is_valid(i) {
+                    self.values.get(i)
+                } else {
+                    None
+                }
             }
 
+            /// The value at `i` by copy (or `Arc` clone), or `None` if NULL.
+            #[inline]
+            pub fn value(&self, i: usize) -> Option<$ty> {
+                self.value_ref(i).cloned()
+            }
+
+            /// Every element, with `None` for NULL.
             pub fn iter_values(&self) -> impl Iterator<Item = Option<&$ty>> {
-                self.0.iter().map(|v| v.as_ref())
+                (0..self.values.len()).map(move |i| self.value_ref(i))
+            }
+
+            /// Every element as an owned option, for handing to other libraries.
+            pub fn to_options(&self) -> Vec<Option<$ty>> {
+                self.iter_values().map(|v| v.cloned()).collect()
+            }
+
+            /// A new array of the elements at `indices`. An index past the end
+            /// gives a NULL.
+            pub fn take(&self, indices: &[usize]) -> Self {
+                // Common case: no NULLs and every index in range. Gather the values
+                // and skip building a validity vector.
+                if self.valid.is_none() && indices.iter().all(|&i| i < self.values.len()) {
+                    return Self {
+                        values: indices.iter().map(|&i| self.values[i].clone()).collect(),
+                        valid: None,
+                    };
+                }
+                let mut values = Vec::with_capacity(indices.len());
+                let mut valid = Vec::with_capacity(indices.len());
+                for &i in indices {
+                    match self.value_ref(i) {
+                        Some(v) => {
+                            values.push(v.clone());
+                            valid.push(true);
+                        }
+                        None => {
+                            values.push($null);
+                            valid.push(false);
+                        }
+                    }
+                }
+                let valid = if valid.iter().all(|&v| v) {
+                    None
+                } else {
+                    Some(valid)
+                };
+                Self { values, valid }
+            }
+
+            /// Append `other` onto `self`.
+            pub fn extend_from(&mut self, other: &Self) {
+                let n = self.values.len();
+                self.values.extend(other.values.iter().cloned());
+                self.valid = match (self.valid.take(), &other.valid) {
+                    (None, None) => None,
+                    (current, theirs) => {
+                        let mut valid = current.unwrap_or_else(|| vec![true; n]);
+                        match theirs {
+                            None => valid.extend(std::iter::repeat(true).take(other.values.len())),
+                            Some(v) => valid.extend_from_slice(v),
+                        }
+                        Some(valid)
+                    }
+                };
+            }
+
+            /// Whether `i` is in range and not NULL.
+            #[inline]
+            fn is_valid(&self, i: usize) -> bool {
+                i < self.values.len() && self.valid.as_ref().map_or(true, |v| v[i])
             }
         }
 
@@ -258,28 +334,28 @@ macro_rules! impl_array {
             }
 
             fn len(&self) -> usize {
-                self.0.len()
+                self.values.len()
             }
 
             fn is_empty(&self) -> bool {
-                self.0.is_empty()
+                self.values.is_empty()
             }
 
             /// Out-of-range indices count as null rather than panicking.
             fn is_null(&self, i: usize) -> bool {
-                self.0.get(i).map_or(true, |v| v.is_none())
+                !self.is_valid(i)
             }
 
             fn null_count(&self) -> usize {
-                self.0.iter().filter(|v| v.is_none()).count()
+                match &self.valid {
+                    None => 0,
+                    Some(v) => v.iter().filter(|&&b| !b).count(),
+                }
             }
 
             /// Returns `None` for a null value and for an out-of-range index.
             fn get(&self, i: usize) -> Option<Scalar> {
-                self.0
-                    .get(i)
-                    .and_then(|v| v.as_ref())
-                    .map(|v| Scalar::$scalar(v.owned()))
+                self.value_ref(i).map(|v| Scalar::$scalar(v.owned()))
             }
         }
 
@@ -302,21 +378,28 @@ macro_rules! impl_array {
     };
 }
 
-impl_array!(BoolArray, Boolean, DataType::Boolean, bool, Bool);
-impl_array!(I32Array, Int32, DataType::Int32, i32, I32);
-impl_array!(I64Array, Int64, DataType::Int64, i64, I64);
-impl_array!(F64Array, Float64, DataType::Float64, f64, F64);
-impl_array!(StrArray, Utf8, DataType::Utf8, std::sync::Arc<str>, Str);
+impl_array!(BoolArray, Boolean, DataType::Boolean, bool, Bool, false);
+impl_array!(I32Array, Int32, DataType::Int32, i32, I32, 0);
+impl_array!(I64Array, Int64, DataType::Int64, i64, I64, 0);
+impl_array!(F64Array, Float64, DataType::Float64, f64, F64, 0.0);
+impl_array!(
+    StrArray,
+    Utf8,
+    DataType::Utf8,
+    std::sync::Arc<str>,
+    Str,
+    std::sync::Arc::from("")
+);
 
 /// A zero-length array of the given type.
 pub(crate) fn empty_array(data_type: DataType) -> ArrayRef {
     match data_type {
-        DataType::Boolean => ArrayRef::Boolean(BoolArray(Vec::new())),
-        DataType::Int32 => ArrayRef::Int32(I32Array(Vec::new())),
-        DataType::Int64 => ArrayRef::Int64(I64Array(Vec::new())),
-        DataType::Float64 => ArrayRef::Float64(F64Array(Vec::new())),
-        DataType::Utf8 => ArrayRef::Utf8(StrArray(Vec::new())),
-        DataType::Date => ArrayRef::Date(I32Array(Vec::new())),
-        DataType::Timestamp => ArrayRef::Timestamp(I64Array(Vec::new())),
+        DataType::Boolean => ArrayRef::Boolean(BoolArray::default()),
+        DataType::Int32 => ArrayRef::Int32(I32Array::default()),
+        DataType::Int64 => ArrayRef::Int64(I64Array::default()),
+        DataType::Float64 => ArrayRef::Float64(F64Array::default()),
+        DataType::Utf8 => ArrayRef::Utf8(StrArray::default()),
+        DataType::Date => ArrayRef::Date(I32Array::default()),
+        DataType::Timestamp => ArrayRef::Timestamp(I64Array::default()),
     }
 }

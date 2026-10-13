@@ -73,31 +73,31 @@ pub fn f64_key_bits(v: f64) -> u64 {
 /// Read the key for row `row` of `col`.
 pub fn key_at(col: &ArrayRef, row: usize) -> KeyPart<'_> {
     match col {
-        ArrayRef::Boolean(a) => match a.0.get(row).copied().flatten() {
+        ArrayRef::Boolean(a) => match a.value(row) {
             Some(v) => KeyPart::Bool(v),
             None => KeyPart::Null,
         },
-        ArrayRef::Int32(a) => match a.0.get(row).copied().flatten() {
+        ArrayRef::Int32(a) => match a.value(row) {
             Some(v) => KeyPart::I32(v),
             None => KeyPart::Null,
         },
-        ArrayRef::Int64(a) => match a.0.get(row).copied().flatten() {
+        ArrayRef::Int64(a) => match a.value(row) {
             Some(v) => KeyPart::I64(v),
             None => KeyPart::Null,
         },
-        ArrayRef::Float64(a) => match a.0.get(row).copied().flatten() {
+        ArrayRef::Float64(a) => match a.value(row) {
             Some(v) => KeyPart::F64(f64_key_bits(v)),
             None => KeyPart::Null,
         },
-        ArrayRef::Date(a) => match a.0.get(row).copied().flatten() {
+        ArrayRef::Date(a) => match a.value(row) {
             Some(v) => KeyPart::I32(v),
             None => KeyPart::Null,
         },
-        ArrayRef::Timestamp(a) => match a.0.get(row).copied().flatten() {
+        ArrayRef::Timestamp(a) => match a.value(row) {
             Some(v) => KeyPart::I64(v),
             None => KeyPart::Null,
         },
-        ArrayRef::Utf8(a) => match a.0.get(row).and_then(|v| v.as_deref()) {
+        ArrayRef::Utf8(a) => match a.value_ref(row).map(|v| &**v) {
             Some(s) => KeyPart::Str(s),
             None => KeyPart::Null,
         },

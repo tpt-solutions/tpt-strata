@@ -107,11 +107,11 @@ where
             let vals = pos
                 .into_iter()
                 .map(|p| match p {
-                    Some((b, r)) => parts[b].and_then(|a| a.0.get(r).cloned().flatten()),
+                    Some((b, r)) => parts[b].and_then(|a| a.value(r)),
                     None => None,
                 })
                 .collect();
-            ArrayRef::$variant($arr(vals))
+            ArrayRef::$variant($arr::from_nulls(vals))
         }};
     }
     match dt {
@@ -153,10 +153,10 @@ fn gather_packed(batches: &[BatchRef], col: usize, pos: &[u64], dt: DataType) ->
                     }
                     let b = (p >> 32) as usize;
                     let r = (p & 0xffff_ffff) as usize;
-                    parts[b].and_then(|a| a.0.get(r).cloned().flatten())
+                    parts[b].and_then(|a| a.value(r))
                 })
                 .collect();
-            ArrayRef::$variant($arr(vals))
+            ArrayRef::$variant($arr::from_nulls(vals))
         }};
     }
     match dt {
@@ -393,18 +393,16 @@ impl Predicate {
                     | Comparison::Lte
             ) {
                 let lit = *lit;
-                return for_rows(batch.row_count(), rows, |row| {
-                    match arr.0.get(row).copied().flatten() {
-                        Some(x) if !x.is_nan() && !lit.is_nan() => match op {
-                            Comparison::Eq => x == lit,
-                            Comparison::NotEq => x != lit,
-                            Comparison::Gt => x > lit,
-                            Comparison::Gte => x >= lit,
-                            Comparison::Lt => x < lit,
-                            _ => x <= lit,
-                        },
-                        _ => false,
-                    }
+                return for_rows(batch.row_count(), rows, |row| match arr.value(row) {
+                    Some(x) if !x.is_nan() && !lit.is_nan() => match op {
+                        Comparison::Eq => x == lit,
+                        Comparison::NotEq => x != lit,
+                        Comparison::Gt => x > lit,
+                        Comparison::Gte => x >= lit,
+                        Comparison::Lt => x < lit,
+                        _ => x <= lit,
+                    },
+                    _ => false,
                 });
             }
         }

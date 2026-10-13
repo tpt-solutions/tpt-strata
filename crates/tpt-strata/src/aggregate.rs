@@ -189,7 +189,7 @@ impl AggState {
                 ArrayRef::Int32(a) => {
                     for (k, &gid) in gids.iter().enumerate() {
                         let row = start + k;
-                        if let Some(v) = a.0[row] {
+                        if let Some(v) = a.value(row) {
                             int[gid] += i128::from(v);
                             float[gid] += f64::from(v);
                             saw[gid] = true;
@@ -199,7 +199,7 @@ impl AggState {
                 ArrayRef::Int64(a) => {
                     for (k, &gid) in gids.iter().enumerate() {
                         let row = start + k;
-                        if let Some(v) = a.0[row] {
+                        if let Some(v) = a.value(row) {
                             int[gid] += i128::from(v);
                             float[gid] += v as f64;
                             saw[gid] = true;
@@ -209,7 +209,7 @@ impl AggState {
                 ArrayRef::Float64(a) => {
                     for (k, &gid) in gids.iter().enumerate() {
                         let row = start + k;
-                        if let Some(v) = a.0[row] {
+                        if let Some(v) = a.value(row) {
                             float[gid] += v;
                             saw[gid] = true;
                         }
@@ -255,7 +255,7 @@ impl AggState {
                 ArrayRef::Int32(a) => {
                     for (k, &gid) in gids.iter().enumerate() {
                         let row = start + k;
-                        if let Some(v) = a.0[row] {
+                        if let Some(v) = a.value(row) {
                             int[gid] += i128::from(v);
                             n[gid] += 1;
                         }
@@ -264,7 +264,7 @@ impl AggState {
                 ArrayRef::Int64(a) => {
                     for (k, &gid) in gids.iter().enumerate() {
                         let row = start + k;
-                        if let Some(v) = a.0[row] {
+                        if let Some(v) = a.value(row) {
                             int[gid] += i128::from(v);
                             n[gid] += 1;
                         }
@@ -273,7 +273,7 @@ impl AggState {
                 ArrayRef::Float64(a) => {
                     for (k, &gid) in gids.iter().enumerate() {
                         let row = start + k;
-                        if let Some(v) = a.0[row] {
+                        if let Some(v) = a.value(row) {
                             float[gid] += v;
                             n[gid] += 1;
                         }
