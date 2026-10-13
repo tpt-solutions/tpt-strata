@@ -125,6 +125,51 @@ where
     }
 }
 
+/// A `(batch, row)` position packed into one word, for join output. `NO_ROW`
+/// marks a row with no partner on that side. A packed position is 8 bytes,
+/// where `Option<(usize, usize)>` is 24.
+const NO_ROW: u64 = u64::MAX;
+
+fn pack(batch: usize, row: usize) -> u64 {
+    ((batch as u64) << 32) | row as u64
+}
+
+/// Like [`gather_opt`], over packed positions. `NO_ROW` gives a NULL.
+fn gather_packed(batches: &[BatchRef], col: usize, pos: &[u64], dt: DataType) -> ArrayRef {
+    macro_rules! take_typed {
+        ($variant:ident, $arr:ident) => {{
+            let parts: Vec<Option<&$arr>> = batches
+                .iter()
+                .map(|b| match &*b.columns[col] {
+                    ArrayRef::$variant(a) => Some(a),
+                    _ => None,
+                })
+                .collect();
+            let vals = pos
+                .iter()
+                .map(|&p| {
+                    if p == NO_ROW {
+                        return None;
+                    }
+                    let b = (p >> 32) as usize;
+                    let r = (p & 0xffff_ffff) as usize;
+                    parts[b].and_then(|a| a.0.get(r).cloned().flatten())
+                })
+                .collect();
+            ArrayRef::$variant($arr(vals))
+        }};
+    }
+    match dt {
+        DataType::Boolean => take_typed!(Boolean, BoolArray),
+        DataType::Int32 => take_typed!(Int32, I32Array),
+        DataType::Int64 => take_typed!(Int64, I64Array),
+        DataType::Float64 => take_typed!(Float64, F64Array),
+        DataType::Utf8 => take_typed!(Utf8, StrArray),
+        DataType::Date => take_typed!(Date, I32Array),
+        DataType::Timestamp => take_typed!(Timestamp, I64Array),
+    }
+}
+
 // === Data source ===
 
 /// Source operator over pre-materialized batches.
@@ -736,9 +781,9 @@ impl PhysicalPlan for JoinExec {
             .collect();
         // Sized for one output row per left row: exact for key joins, and a
         // good start for the rest.
-        let mut left_pos: Vec<Option<(usize, usize)>> =
+        let mut left_pos: Vec<u64> =
             Vec::with_capacity(left_batches.iter().map(|b| b.row_count()).sum());
-        let mut right_pos: Vec<Option<(usize, usize)>> =
+        let mut right_pos: Vec<u64> =
             Vec::with_capacity(left_batches.iter().map(|b| b.row_count()).sum());
         for (lbi, lb) in left_batches.iter().enumerate() {
             for row in 0..lb.row_count() {
@@ -752,13 +797,13 @@ impl PhysicalPlan for JoinExec {
                     Some(hits) if !hits.is_empty() => {
                         for &(rbi, rrow) in hits {
                             right_matched[rbi][rrow] = true;
-                            left_pos.push(Some((lbi, row)));
-                            right_pos.push(Some((rbi, rrow)));
+                            left_pos.push(pack(lbi, row));
+                            right_pos.push(pack(rbi, rrow));
                         }
                     }
                     _ if self.kind.keeps_left() => {
-                        left_pos.push(Some((lbi, row)));
-                        right_pos.push(None);
+                        left_pos.push(pack(lbi, row));
+                        right_pos.push(NO_ROW);
                     }
                     _ => {}
                 }
@@ -768,8 +813,8 @@ impl PhysicalPlan for JoinExec {
             for (rbi, matched_rows) in right_matched.iter().enumerate() {
                 for (row, &matched) in matched_rows.iter().enumerate() {
                     if !matched {
-                        left_pos.push(None);
-                        right_pos.push(Some((rbi, row)));
+                        left_pos.push(NO_ROW);
+                        right_pos.push(pack(rbi, row));
                     }
                 }
             }
@@ -779,11 +824,11 @@ impl PhysicalPlan for JoinExec {
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.len());
         for c in 0..left_width {
             let dt = self.schema.fields[c].data_type;
-            columns.push(gather_opt(&left_batches, c, left_pos.iter().copied(), dt));
+            columns.push(gather_packed(&left_batches, c, &left_pos, dt));
         }
         for c in 0..self.right.schema().len() {
             let dt = self.schema.fields[left_width + c].data_type;
-            columns.push(gather_opt(&right_batches, c, right_pos.iter().copied(), dt));
+            columns.push(gather_packed(&right_batches, c, &right_pos, dt));
         }
 
         Ok(vec![Arc::new(Batch::new_unchecked(

@@ -166,3 +166,19 @@ resolves each batch's array once. Q3 dropped from 95 to 59 ms.
 
 Parity is still not reached. Q3 is about 6× DataFusion on one thread; Q1 and
 Q2 are about 3–4×.
+
+### Phase 15, third run (packed join positions, shared Parquet strings)
+
+| query | tpt-strata (1 thread) | DataFusion (1 partition) | DataFusion (all cores) | DuckDB (1 thread) | DuckDB (all cores) |
+|---|---|---|---|---|---|
+| Q1 group by + 3 aggregates | 28.4 ms | 12.8 ms | 3.97 ms | 22.8 ms | 6.73 ms |
+| Q2 filter + sort + limit | 14.5 ms | 3.81 ms | 2.19 ms | 13.5 ms | 3.41 ms |
+| Q3 join + group by | 53.0 ms | 9.45 ms | 4.25 ms | 6.48 ms | 5.96 ms |
+
+Load: tpt-strata 97 ms (was 146), DataFusion 38 ms. The DataFusion numbers
+moved between runs on this machine (Q1 was 7.9 ms in the last run), so
+compare the tpt-strata figures across runs, not against DataFusion's.
+
+Joins now write one packed 8-byte position per row, not a 24-byte `Option`.
+Q3 went from 59 to 53 ms, and load from 146 to 97 ms, mostly from sharing one
+`Arc` per distinct Parquet string.
