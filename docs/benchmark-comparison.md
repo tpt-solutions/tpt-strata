@@ -10,29 +10,132 @@ All three engines return the same results on all three queries. Every
 engine's output was checked against tpt-strata's (row count, numeric sum, and
 text length).
 
-On one thread, tpt-strata is slower than both other engines on these queries.
-DataFusion is about 4–13× faster and DuckDB is about 1.5–16× faster. The
-largest gap is on the join, where tpt-strata is about 11× slower than
-DataFusion and 16× slower than DuckDB. On the group-by, tpt-strata is close to
-DuckDB and about 4× slower than DataFusion.
+Latest run: 2026-10-14, 1,000,000 rows, one thread unless marked. Times are the
+median of 5 runs after one warm-up. All engines return the same results on all
+five queries.
 
-Query times, 1,000,000 rows, median of 5 runs after one warm-up:
+On one thread, tpt-strata is faster than DataFusion on Q1 to Q4 and slower on
+Q5 (21.8 ms against 15.3 ms). It is faster than DuckDB on every query. Against
+DataFusion on all cores, tpt-strata (one thread) is 1.1× to 2.6× slower on
+Q1 to Q4, and 4.2× slower on Q5.
 
-| query | tpt-strata (1 thread) | DataFusion (1 partition) | DataFusion (20 cores) | DuckDB (1 thread) | DuckDB (20 threads) |
+| query | tpt-strata (1 thread) | DataFusion (1 partition) | DataFusion (all cores) | DuckDB (1 thread) | DuckDB (all cores) |
 |---|---|---|---|---|---|
-| Q1 group by, SUM, AVG, COUNT | 34.7 ms | 8.50 ms | 4.22 ms | 23.4 ms | 7.48 ms |
-| Q2 filter, sort, limit 100 | 53.7 ms | 4.20 ms | 2.01 ms | 13.1 ms | 3.80 ms |
-| Q3 join to 1,000 rows, group by | 103.7 ms | 9.39 ms | 4.41 ms | 6.62 ms | 5.69 ms |
+| Q1 group by, SUM, AVG, COUNT | 14.1 ms | 20.0 ms | 7.81 ms | 47.5 ms | 14.7 ms |
+| Q2 filter, sort, limit 100 | 6.91 ms | 9.25 ms | 4.89 ms | 26.3 ms | 6.76 ms |
+| Q3 join to 1,000 rows, group by | 11.0 ms | 23.6 ms | 9.61 ms | 14.0 ms | 9.54 ms |
+| Q4 group by id, HAVING keeps none (1M groups) | 107 ms | 132 ms | 40.7 ms | 191 ms | 41.6 ms |
+| Q5 LIKE filter, count and sum | 21.8 ms | 15.3 ms | 5.25 ms | 26.5 ms | 4.93 ms |
+
+A hand-written loop over the same data, one thread, is the floor:
+
+| query | hand loop | tpt-strata ÷ loop | % of bandwidth bound |
+|---|---|---|---|
+| Q1 | 2.89 ms | 4.9× | 16% |
+| Q2 | 7.12 ms | 1.0× | 30% |
+| Q3 | 2.76 ms | 4.0× | 19% |
+| Q4 | 8.46 ms | 12.7× | 2% |
+| Q5 | 3.68 ms | 5.9× | 5% |
+
+The bandwidth bound uses a single-thread read rate of 7.8 GB/s. It is the
+floor for a scan that reads the ideal bytes per row, so the percentages show
+how far each query is from a memory-bound scan.
 
 Load (read the Parquet file into each engine's format, single run):
 
 | engine | load |
 |---|---|
-| tpt-strata (1 thread) | 104 ms |
-| DataFusion (1 partition / 20) | 38 ms / 32 ms |
-| DuckDB (1 thread / 20) | 121 ms / 117 ms |
+| tpt-strata (1 thread) | 198 ms |
+| DataFusion (1 partition / 20) | 868 ms / 90 ms |
+| DuckDB (1 thread / 20) | 331 ms / 291 ms |
 
-Cost of the dependencies, measured on the whole benchmark:
+Load times vary more between runs than query times. The 2026-10-13 run
+measured tpt-strata at 104 ms, so treat load as noisy.
+
+### All cores: tpt-strata with the `parallel` feature (2026-10-14)
+
+The same harness, built with `cargo run --release --features parallel`. This
+is a separate run from the single-thread one above. Read-rate probe and hand
+loops moved between the two runs, so compare ratios within each run, not times
+across them.
+
+| query | tpt-strata, default (1 thread, earlier run) | tpt-strata, `parallel` | DataFusion (1 partition) | DataFusion (all cores) | DuckDB (all cores) |
+|---|---|---|---|---|---|
+| Q1 group by + 3 aggregates | 14.1 ms | 4.00 ms | 16.9 ms | 6.25 ms | 10.4 ms |
+| Q2 filter + sort + limit | 6.91 ms | 5.85 ms | 5.33 ms | 3.12 ms | 4.66 ms |
+| Q3 join + group by | 11.0 ms | 5.66 ms | 19.3 ms | 6.49 ms | 8.45 ms |
+| Q4 group by id (1M groups) | 107 ms | **564 ms** | 74.9 ms | 34.0 ms | 30.4 ms |
+| Q5 LIKE filter, count and sum | 21.8 ms | 15.7 ms | 12.4 ms | 3.68 ms | 4.03 ms |
+
+The default-build column is from the single-thread run above, not this one.
+The `parallel` column and the DataFusion and DuckDB columns are from this run.
+Results match on all queries in both builds.
+
+- **Q1 and Q3 scale.** With `parallel`, tpt-strata is ahead of DataFusion on
+  all cores on Q1 (4.00 ms against 6.25 ms), and close on Q3 (5.66 ms against
+  6.49 ms).
+- **Q2 and Q5 do not scale.** Only aggregation and the join probe run in
+  parallel, so Q2 (sort-bound) gains nothing, and Q5's filter is still
+  single-threaded.
+- **Q4 regresses about 5×, and the merge is the cost.** Timed in a temporary
+  build (timers since removed), Q4's segment workers take about 18 ms, and the
+  merge takes about 300 ms for 1,000,000 groups. The merge rebuilds a `Vec` key
+  and does a hash lookup for every group in every partial. It never uses the
+  dense-slot or single-key paths the workers use, so each group pays for the
+  generic path. Q1 and Q3 merge only a few groups, which is why they scale.
+  Fixing this means giving the merge the same fast paths, or merging dense
+  partials by slot. The first step is in the next section.
+
+### Q2 and Q5 in the parallel build (2026-10-14)
+
+Timed with temporary per-batch timers (removed afterwards): Q5's time was in
+the `LIKE` predicate, 8 to 12 ms per run, not in the copy of the kept rows,
+which was about 1 ms. That corrects the earlier guess that the copy was the
+cost. Q2's predicate took 2.5 to 4.7 ms.
+
+The row selection for a predicate now splits the rows across threads under
+the `parallel` feature, joins the chunks in order, and keeps the same
+branch-free compaction within each chunk. Inputs under 256k rows stay on one
+thread. The default build is unchanged, and the tests pass with and without
+the feature.
+
+| query | tpt-strata (parallel) | hand loop (1 thread) | DataFusion (all cores) | DuckDB (all cores) |
+|---|---|---|---|---|
+| Q1 group by + 3 aggregates | 2.55 ms | 1.05 ms | 3.59 ms | 7.39 ms |
+| Q2 filter + sort + limit | 3.35 ms | 4.31 ms | 2.14 ms | 3.13 ms |
+| Q3 join + group by | 2.23 ms | 0.64 ms | 4.05 ms | 5.15 ms |
+| Q4 group by id (1M groups) | 73.4 ms | 3.28 ms | 32.4 ms | 24.8 ms |
+| Q5 LIKE filter, count and sum | 4.76 ms | 2.85 ms | 2.48 ms | 3.49 ms |
+
+Q5 fell from 9.56 ms to 4.76 ms and is now within about 2× of DataFusion on
+all cores. Q2 was 4.68 ms in the run with timers and 3.35 ms here, so its
+run-to-run spread is wide; treat it as about 1.5× DataFusion, not a
+precise figure. Q4 is about 2.3× DataFusion and 3× DuckDB on all cores.
+
+### Parallel merge with a single-key index (2026-10-14)
+
+The merge now indexes a single group column on the key itself, as the segment
+pass does, instead of building a `Vec` key per group. Tests and clippy pass
+with `--features parallel`. Same harness, same run for all engines and the
+hand loop, so compare ratios within this table:
+
+| query | tpt-strata (parallel) | hand loop (1 thread) | DataFusion (all cores) | DuckDB (all cores) |
+|---|---|---|---|---|
+| Q1 group by + 3 aggregates | 2.34 ms | 0.92 ms | 3.61 ms | 8.31 ms |
+| Q2 filter + sort + limit | 2.99 ms | 3.86 ms | 1.90 ms | 3.56 ms |
+| Q3 join + group by | 2.60 ms | 0.71 ms | 4.12 ms | 4.93 ms |
+| Q4 group by id (1M groups) | 166 ms | 3.57 ms | 30.0 ms | 21.7 ms |
+| Q5 LIKE filter, count and sum | 9.56 ms | 1.87 ms | 2.45 ms | 2.74 ms |
+
+Q4 fell from 564 ms to 166 ms in the parallel build, and it still trails
+DataFusion and DuckDB on all cores by about 5× and 8×. The machine was faster
+in this run (the hand loops are about half their earlier times), so the
+absolute numbers are not comparable with the earlier tables, only the ratios.
+The remaining Q4 cost has not been measured. The next step is the slot-based
+merge for a dense key, which would avoid hashing in the merge altogether.
+
+Cost of the dependencies, measured on the whole benchmark (from the
+2026-10-13 build; not re-measured):
 
 | measure | value |
 |---|---|
@@ -53,6 +156,11 @@ The same query, Q1, measured at each stage of the work:
 | first measurement (boxed `Scalar` values everywhere) | 107 ms | 68 ms | 269 ms |
 | typed group keys and accumulators, typed filter, typed sort and join keys, Fx-style hasher | 33 ms | 55 ms | 178 ms |
 | shared (`Arc`) column storage and column pruning before joins | 31–35 ms | 49–54 ms | 101–104 ms |
+| 2026-10-14 run, after the later performance passes (table above) | 14.1 ms | 6.91 ms | 11.0 ms |
+
+The 2026-10-14 row is from a single run and uses a different query set, so
+treat the two earlier rows as a record of the work, not a like-for-like
+comparison.
 
 Q2 sorts roughly 200,000 rows after its filter (an estimate from the data
 distribution). The sort has not been profiled on its own, so the next step is
@@ -83,12 +191,19 @@ to profile it before changing it.
 - The data is written once as Parquet with tpt-strata's own writer. Each
   engine loads that file, and the load time is recorded separately.
 - Queries are the same SQL in all three, except for explicit `::BIGINT`
-  casts on the DuckDB side, because DuckDB widens `SUM` of a BIGINT.
+  casts on the DuckDB side, because DuckDB widens `SUM` of a BIGINT. There
+  are five queries: Q1 to Q3 as before, Q4 (group by id, with a HAVING that
+  keeps no group, so the output is empty) and Q5 (`region LIKE 'c%'`, then
+  count and sum).
 - Timing: one warm-up run, then five timed runs; the median is reported. Each
   timed run includes converting the result to Rust values, so the cost is
   comparable across engines.
-- Thread settings: tpt-strata is single-threaded by design. DataFusion and
-  DuckDB are shown on one thread and on all 20 logical CPUs.
+- Thread settings: tpt-strata is single-threaded in the main results. An
+  opt-in `parallel` feature exists and is covered in its own sections below.
+  DataFusion and DuckDB are shown on one thread and on all 20 logical CPUs.
+- A hand-written loop over the same data is also timed, as a floor for each
+  query. Percentages of the bandwidth bound use a measured single-thread read
+  rate.
 - Machine: Windows 11, 20 logical CPUs, release builds. Rust 1.98, clang for
   DuckDB's bundled build.
 

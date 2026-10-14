@@ -16,5 +16,9 @@ datafusion = "55"
 duckdb = { version = "1", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
+[features]
+# Builds tpt-strata with its opt-in multi-threaded aggregation and join probe.
+parallel = ["tpt-strata/parallel"]
+
 [profile.release]
 debug = false

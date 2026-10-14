@@ -28,7 +28,18 @@ const REGIONS: [&str; 8] = [
     "north", "south", "east", "west", "central", "coastal", "alpine", "desert",
 ];
 
-const Q1_TPT: &str = "SELECT region, SUM(quantity) AS units, AVG(price) AS avg_price, COUNT(*) AS n \
+// Which tpt-strata build this run measured: the default is single-threaded;
+// `--features parallel` enables the opt-in multi-threaded aggregation and probe.
+#[cfg(feature = "parallel")]
+const TPT_BUILD: &str = "parallel feature";
+#[cfg(not(feature = "parallel"))]
+const TPT_BUILD: &str = "default build";
+#[cfg(feature = "parallel")]
+const TPT_LABEL: &str = "tpt-strata (parallel)";
+#[cfg(not(feature = "parallel"))]
+const TPT_LABEL: &str = "tpt-strata (1 thread)";
+
+const Q1_TPT: &str ="SELECT region, SUM(quantity) AS units, AVG(price) AS avg_price, COUNT(*) AS n \
      FROM facts GROUP BY region ORDER BY region";
 const Q1_DUCK: &str = "SELECT region, SUM(quantity)::BIGINT AS units, AVG(price) AS avg_price, \
      COUNT(*)::BIGINT AS n FROM facts GROUP BY region ORDER BY region";
@@ -479,7 +490,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("- rows (facts): {rows}, dims: 1000");
     println!("- timed runs per query: {RUNS} (after one warm-up), median reported");
     println!("- logical CPUs: {cpus}");
-    println!("- tpt-strata 1.0.1 (path dependency), DataFusion 55.2, DuckDB 1.10501");
+    println!("- tpt-strata 1.0.1 (path dependency, {TPT_BUILD}), DataFusion 55.2, DuckDB 1.10501");
 
     let dir: PathBuf = std::env::temp_dir().join("tpt-strata-compare");
     std::fs::create_dir_all(&dir)?;
@@ -512,7 +523,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n## Load (Parquet to engine format, median not used: single run)");
     println!("| engine | load ms |\n|---|---|");
-    println!("| tpt-strata (1 thread) | {} |", fmt_ms(tpt_load));
+    println!("| {TPT_LABEL} | {} |", fmt_ms(tpt_load));
     println!("| DataFusion (1 partition) | {} |", fmt_ms(df_one_load));
     println!("| DataFusion ({cpus} partitions) | {} |", fmt_ms(df_all_load));
     println!("| DuckDB (1 thread) | {} |", fmt_ms(duck_one_load));
@@ -556,7 +567,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let reference = summarize(&tpt_rows);
         results.push(Measured {
             query: name,
-            engine: "tpt-strata (1 thread)".into(),
+            engine: TPT_LABEL.into(),
             median_ms: tpt_ms,
             summary: summarize(&tpt_rows),
             matches_reference: true,
@@ -667,7 +678,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_or(f64::NAN, |m| m.median_ms)
         };
         let floor = get("hand-written loop (1 thread)");
-        let tpt = get("tpt-strata (1 thread)");
+        let tpt = get(TPT_LABEL);
         let df = get("DataFusion (1 partition)");
         let duck = get("DuckDB (1 thread)");
         let bound = bound_ms(name);

@@ -390,23 +390,58 @@ fn literal_key(v: &Scalar) -> Option<KeyPart<'_>> {
 }
 
 /// The rows in `rows` (or every row below `n`) for which `keep` holds, in order.
-fn for_rows(n: usize, rows: Option<&[usize]>, mut keep: impl FnMut(usize) -> bool) -> Vec<usize> {
+fn for_rows(n: usize, rows: Option<&[usize]>, keep: impl Fn(usize) -> bool + Sync) -> Vec<usize> {
     match rows {
-        // Branch-free compaction: every row index is written, and the output
-        // length advances only on a match. A selective filter over random data
-        // mispredicts a branch on about half the rows, so this is much faster.
         None => {
-            let mut out = vec![0usize; n];
-            let mut k = 0;
-            for row in 0..n {
-                out[k] = row;
-                k += usize::from(keep(row));
+            #[cfg(feature = "parallel")]
+            if let Some(out) = for_all_rows_parallel(n, &keep) {
+                return out;
             }
-            out.truncate(k);
-            out
+            compact(0..n, &keep)
         }
         Some(rows) => rows.iter().copied().filter(|&row| keep(row)).collect(),
     }
+}
+
+/// Branch-free compaction over `range`: every row index is written, and the
+/// output length advances only on a match. A selective filter over random data
+/// mispredicts a branch on about half the rows, so this is much faster.
+fn compact(range: std::ops::Range<usize>, keep: &impl Fn(usize) -> bool) -> Vec<usize> {
+    let mut out = vec![0usize; range.len()];
+    let mut k = 0;
+    for row in range {
+        out[k] = row;
+        k += usize::from(keep(row));
+    }
+    out.truncate(k);
+    out
+}
+
+/// Compact all rows below `n` on worker threads, one contiguous chunk each,
+/// and join the chunks in order. Small inputs stay on one thread, where the
+/// thread start-up cost would outweigh the work.
+#[cfg(feature = "parallel")]
+fn for_all_rows_parallel(n: usize, keep: &(impl Fn(usize) -> bool + Sync)) -> Option<Vec<usize>> {
+    const MIN_ROWS: usize = 1 << 18;
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
+    if threads < 2 || n < MIN_ROWS {
+        return None;
+    }
+    let per = n.div_ceil(threads);
+    let parts: Vec<Vec<usize>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..n)
+            .step_by(per)
+            .map(|start| {
+                let end = (start + per).min(n);
+                scope.spawn(move || compact(start..end, keep))
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    });
+    Some(parts.concat())
 }
 
 impl Predicate {

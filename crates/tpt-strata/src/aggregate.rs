@@ -824,11 +824,24 @@ impl AggregateExec {
         &self,
         batches: &[BatchRef],
         partials: Vec<Partial>,
+        dense: Option<(i64, usize)>,
     ) -> (Vec<Option<(usize, usize)>>, Vec<AggState>) {
         let global = self.group_by.is_empty();
         let mut states = self.new_states();
         let mut first: Vec<Option<(usize, usize)>> = Vec::new();
         let mut index: FastMap<Vec<KeyPart<'_>>, usize> = FastMap::default();
+        // With one group column, index on the key itself, as the segment pass
+        // does: no per-group Vec.
+        let mut single_index: FastMap<KeyPart<'_>, usize> = FastMap::default();
+        let single = match self.group_by.as_slice() {
+            [c] => Some(*c),
+            _ => None,
+        };
+        // A dense `Int64` key: the slot is the key's offset from the smallest key,
+        // as in the segment pass. The NULL group has its own slot.
+        let mut dense_slots: Vec<usize> =
+            dense.map_or(Vec::new(), |(_, range)| vec![NO_GROUP; range]);
+        let mut null_group = NO_GROUP;
         if global {
             first.push(None);
             index.insert(Vec::new(), 0);
@@ -839,24 +852,64 @@ impl AggregateExec {
         for partial in &partials {
             let mut map = Vec::with_capacity(partial.first.len());
             for rep in &partial.first {
-                let key: Vec<KeyPart<'_>> = match rep {
-                    Some((bi, row)) => self
-                        .group_by
-                        .iter()
-                        .map(|&c| key_at(&batches[*bi].columns[c], *row))
-                        .collect(),
-                    None => Vec::new(),
-                };
-                let gid = match index.get(&key) {
-                    Some(&g) => g,
-                    None => {
-                        let g = first.len();
-                        first.push(*rep);
-                        index.insert(key, g);
-                        for s in &mut states {
-                            s.push_group();
+                let gid = match (dense, single, rep) {
+                    (Some((min, _)), Some(c), Some((bi, row))) => {
+                        let key = key_at(&batches[*bi].columns[c], *row);
+                        let known = match key {
+                            KeyPart::I64(v) => dense_slots[(v - min) as usize],
+                            _ => null_group,
+                        };
+                        if known != NO_GROUP {
+                            known
+                        } else {
+                            let g = first.len();
+                            first.push(*rep);
+                            match key {
+                                KeyPart::I64(v) => dense_slots[(v - min) as usize] = g,
+                                _ => null_group = g,
+                            }
+                            for s in &mut states {
+                                s.push_group();
+                            }
+                            g
                         }
-                        g
+                    }
+                    (_, Some(c), Some((bi, row))) => {
+                        let key = key_at(&batches[*bi].columns[c], *row);
+                        match single_index.get(&key) {
+                            Some(&g) => g,
+                            None => {
+                                let g = first.len();
+                                first.push(*rep);
+                                single_index.insert(key, g);
+                                for s in &mut states {
+                                    s.push_group();
+                                }
+                                g
+                            }
+                        }
+                    }
+                    _ => {
+                        let key: Vec<KeyPart<'_>> = match rep {
+                            Some((bi, row)) => self
+                                .group_by
+                                .iter()
+                                .map(|&c| key_at(&batches[*bi].columns[c], *row))
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        match index.get(&key) {
+                            Some(&g) => g,
+                            None => {
+                                let g = first.len();
+                                first.push(*rep);
+                                index.insert(key, g);
+                                for s in &mut states {
+                                    s.push_group();
+                                }
+                                g
+                            }
+                        }
                     }
                 };
                 map.push(gid);
@@ -886,7 +939,7 @@ impl PhysicalPlan for AggregateExec {
             let only = partials.remove(0);
             (only.first, only.states)
         } else {
-            self.merge_partials(&batches, partials)
+            self.merge_partials(&batches, partials, dense)
         };
 
         // The groups to output, in order: all of them, or those HAVING keeps.

@@ -156,6 +156,23 @@ answer" case). Condensed to the three decided-on dimensions:
 Full numbers, per-workload benchmarks, and side-by-side diagnostic wording:
 [validation-memo.md](validation-memo.md), [docs/benchmarks.md](docs/benchmarks.md).
 
+A three-way comparison with DataFusion and DuckDB on the same Parquet data is
+in [docs/benchmark-comparison.md](docs/benchmark-comparison.md). The harness
+lives in `bench/compare`, as a separate workspace.
+
+## Optional `parallel` feature
+
+The default build is single-threaded and has no dependencies. Build with the
+`parallel` feature to run aggregation and the join probe across threads. It
+uses only `std`:
+
+```sh
+cargo build -p tpt-strata --features parallel
+```
+
+Results are the same with or without the feature. The
+[benchmark notes](docs/benchmark-comparison.md) show where it helps.
+
 ## Docs
 
 - [docs/quickstart.md](docs/quickstart.md) — from nothing to a query in five
@@ -174,6 +191,9 @@ Full numbers, per-workload benchmarks, and side-by-side diagnostic wording:
   wiring tpt-strata into a struct-backed store
 - [docs/benchmarks.md](docs/benchmarks.md) — zero-dependency benchmarks and
   the Phase 0 comparison records
+- [docs/benchmark-comparison.md](docs/benchmark-comparison.md) — tpt-strata vs
+  DataFusion vs DuckDB, and the `parallel` feature runs
+- [PUBLISHING.md](PUBLISHING.md) — release steps for the crates.io packages
 
 ## License
 
