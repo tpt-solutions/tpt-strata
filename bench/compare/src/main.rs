@@ -38,6 +38,14 @@ const Q3_TPT: &str = "SELECT dims.label, SUM(facts.quantity) AS units FROM facts
      JOIN dims ON facts.dim_id = dims.id GROUP BY dims.label ORDER BY label";
 const Q3_DUCK: &str = "SELECT dims.label, SUM(facts.quantity)::BIGINT AS units FROM facts \
      JOIN dims ON facts.dim_id = dims.id GROUP BY dims.label ORDER BY label";
+// Q4: one group per id (1,000,000 groups). HAVING keeps no group, so the result is
+// empty and the cost is the grouping itself, not building output rows.
+const Q4_TPT: &str = "SELECT id, SUM(quantity) AS units FROM facts GROUP BY id HAVING SUM(quantity) > 1000";
+const Q4_DUCK: &str = "SELECT id, SUM(quantity)::BIGINT AS units FROM facts GROUP BY id HAVING SUM(quantity) > 1000";
+// Q5: a string predicate (LIKE) that keeps two of eight regions, then a count and sum.
+const Q5_TPT: &str = "SELECT COUNT(*) AS n, SUM(quantity) AS units FROM facts WHERE region LIKE 'c%'";
+const Q5_DUCK: &str = "SELECT COUNT(*)::BIGINT AS n, SUM(quantity)::BIGINT AS units FROM facts \
+     WHERE region LIKE 'c%'";
 
 // === Data ===
 
@@ -413,6 +421,33 @@ fn q3_floor(d: &Data) -> Vec<Vec<Cell>> {
         .collect()
 }
 
+/// Q4 with the ids dense from 0: one sum per id, then the HAVING filter. Only
+/// the sums are built, so the output is empty as the engines' is.
+fn q4_floor(d: &Data) -> Vec<Vec<Cell>> {
+    let mut units = vec![0i64; d.id.len()];
+    for (&id, &q) in d.id.iter().zip(&d.quantity) {
+        units[id as usize] += q;
+    }
+    units
+        .iter()
+        .enumerate()
+        .filter(|(_, &u)| u > 1000)
+        .map(|(id, &u)| vec![Cell::Int(id as i64), Cell::Int(u)])
+        .collect()
+}
+
+/// Q5: count and sum over the regions whose code is 4 (central) or 5 (coastal).
+fn q5_floor(d: &Data, codes: &[u8]) -> Vec<Vec<Cell>> {
+    let (mut n, mut units) = (0i64, 0i64);
+    for (&c, &q) in codes.iter().zip(&d.quantity) {
+        if c == 4 || c == 5 {
+            n += 1;
+            units += q;
+        }
+    }
+    vec![vec![Cell::Int(n), Cell::Int(units)]]
+}
+
 // === Driver ===
 
 struct Measured {
@@ -492,16 +527,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let codes = region_codes(&data);
     // Ideal bytes read per row: Q1 region code + quantity + price (17);
     // Q2 scan reads quantity + price (16); Q3 reads dim_id + quantity (16).
+    // Q4 reads id + quantity (16); Q5 reads region code + quantity (9).
     let bound_ms = |name: &str| -> f64 {
-        let bytes_per_row = if name.starts_with("Q1") { 17.0 } else { 16.0 };
+        let bytes_per_row = if name.starts_with("Q1") {
+            17.0
+        } else if name.starts_with("Q5") {
+            9.0
+        } else {
+            16.0
+        };
         rows as f64 * bytes_per_row / (bw * 1e9) * 1e3
     };
 
     let mut results: Vec<Measured> = Vec::new();
-    let queries: [(&'static str, &str); 3] = [
+    let queries: [(&'static str, &str); 5] = [
         ("Q1 group by + 3 aggregates", Q1_TPT),
         ("Q2 filter + sort + limit", Q2),
         ("Q3 join + group by", Q3_TPT),
+        ("Q4 group by id (high cardinality)", Q4_TPT),
+        ("Q5 LIKE filter + count and sum", Q5_TPT),
     ];
 
     for (name, tpt_sql) in queries {
@@ -521,6 +565,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (floor_ms, floor_cells) = match name {
             n if n.starts_with("Q1") => bench_sync(|| Ok(q1_floor(&data, &codes)))?,
             n if n.starts_with("Q2") => bench_sync(|| Ok(q2_floor(&data, &codes)))?,
+            n if n.starts_with("Q4") => bench_sync(|| Ok(q4_floor(&data)))?,
+            n if n.starts_with("Q5") => bench_sync(|| Ok(q5_floor(&data, &codes)))?,
             _ => bench_sync(|| Ok(q3_floor(&data)))?,
         };
         let s = summarize(&floor_cells);
@@ -540,8 +586,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let sql = if name.starts_with("Q1") {
                 Q1_TPT
             } else if name.starts_with("Q3") {
-                "SELECT dims.label, SUM(facts.quantity) AS units FROM facts \
-                 JOIN dims ON facts.dim_id = dims.id GROUP BY dims.label ORDER BY label"
+                Q3_TPT
+            } else if name.starts_with("Q4") {
+                Q4_TPT
+            } else if name.starts_with("Q5") {
+                Q5_TPT
             } else {
                 Q2
             };
@@ -564,6 +613,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Q1_DUCK
             } else if name.starts_with("Q3") {
                 Q3_DUCK
+            } else if name.starts_with("Q4") {
+                Q4_DUCK
+            } else if name.starts_with("Q5") {
+                Q5_DUCK
             } else {
                 Q2
             };

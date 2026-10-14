@@ -257,30 +257,79 @@ impl Comparison {
     }
 }
 
+/// A `LIKE` pattern classified once, so the common shapes skip the general
+/// matcher: `abc`, `abc%`, `%abc` and `%abc%`. Anything with `_` or an inner `%`
+/// is `General`.
+enum LikeKind<'a> {
+    Exact(&'a str),
+    Prefix(&'a str),
+    Suffix(&'a str),
+    Contains(&'a str),
+    General,
+}
+
+fn like_kind(pattern: &str) -> LikeKind<'_> {
+    let body = pattern.trim_matches('%');
+    if body.contains(['%', '_']) {
+        return LikeKind::General;
+    }
+    match (pattern.starts_with('%'), pattern.ends_with('%')) {
+        (true, true) => LikeKind::Contains(body),
+        (false, true) => LikeKind::Prefix(body),
+        (true, false) => LikeKind::Suffix(body),
+        (false, false) => LikeKind::Exact(body),
+    }
+}
+
+/// Whether `text` matches a pattern already classified by [`like_kind`].
+fn like_matches(kind: &LikeKind<'_>, text: &str, pattern: &str) -> bool {
+    match kind {
+        LikeKind::Exact(b) => text == *b,
+        LikeKind::Prefix(b) => text.starts_with(b),
+        LikeKind::Suffix(b) => text.ends_with(b),
+        LikeKind::Contains(b) => text.contains(b),
+        LikeKind::General => like_match(text, pattern),
+    }
+}
+
 /// Match `text` against a SQL `LIKE` pattern (`%` any run, `_` one char).
+///
+/// Works on UTF-8 bytes, so it allocates nothing. A `_` or a `%` step moves
+/// over whole characters. A literal pattern character is matched byte by byte,
+/// which is exact because UTF-8 is self-synchronising.
 pub(crate) fn like_match(text: &str, pattern: &str) -> bool {
-    let t: Vec<char> = text.chars().collect();
-    let p: Vec<char> = pattern.chars().collect();
+    let (t, p) = (text.as_bytes(), pattern.as_bytes());
+    // Byte width of the character that starts at `i` in `t`.
+    let width = |i: usize| match t[i] {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    };
     let (mut ti, mut pi) = (0usize, 0usize);
     // Position of the last `%` seen, and the text index it currently absorbs up to.
     let mut star: Option<(usize, usize)> = None;
     while ti < t.len() {
-        if pi < p.len() && p[pi] == '%' {
+        if pi < p.len() && p[pi] == b'%' {
             star = Some((pi, ti));
             pi += 1;
-        } else if pi < p.len() && (p[pi] == '_' || p[pi] == t[ti]) {
+        } else if pi < p.len() && p[pi] == b'_' {
+            ti += width(ti);
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
             ti += 1;
             pi += 1;
         } else if let Some((sp, st)) = star {
             // Let the last `%` absorb one more character and retry.
+            let next = st + width(st);
             pi = sp + 1;
-            star = Some((sp, st + 1));
-            ti = st + 1;
+            star = Some((sp, next));
+            ti = next;
         } else {
             return false;
         }
     }
-    while pi < p.len() && p[pi] == '%' {
+    while pi < p.len() && p[pi] == b'%' {
         pi += 1;
     }
     pi == p.len()
@@ -343,7 +392,19 @@ fn literal_key(v: &Scalar) -> Option<KeyPart<'_>> {
 /// The rows in `rows` (or every row below `n`) for which `keep` holds, in order.
 fn for_rows(n: usize, rows: Option<&[usize]>, mut keep: impl FnMut(usize) -> bool) -> Vec<usize> {
     match rows {
-        None => (0..n).filter(|&row| keep(row)).collect(),
+        // Branch-free compaction: every row index is written, and the output
+        // length advances only on a match. A selective filter over random data
+        // mispredicts a branch on about half the rows, so this is much faster.
+        None => {
+            let mut out = vec![0usize; n];
+            let mut k = 0;
+            for row in 0..n {
+                out[k] = row;
+                k += usize::from(keep(row));
+            }
+            out.truncate(k);
+            out
+        }
         Some(rows) => rows.iter().copied().filter(|&row| keep(row)).collect(),
     }
 }
@@ -393,6 +454,53 @@ impl Predicate {
                         _ => x <= lit,
                     },
                     _ => false,
+                });
+            }
+        }
+
+        // A Utf8 column against a string pattern: match the bytes in place, with
+        // no per-row copy. A NULL never matches, as in the general path.
+        if let (Some(ArrayRef::Utf8(arr)), Scalar::Str(pattern)) =
+            (column.map(|c| &**c), &self.value)
+        {
+            if matches!(self.op, Comparison::Like | Comparison::NotLike) {
+                let want = self.op == Comparison::Like;
+                let kind = like_kind(pattern);
+                return for_rows(batch.row_count(), rows, |row| match arr.value_ref(row) {
+                    Some(s) => like_matches(&kind, s, pattern) == want,
+                    None => false,
+                });
+            }
+        }
+
+        // An Int64 column against an Int64 literal: read the values directly.
+        // A NULL never matches, as in the general path.
+        let int_column = match column.map(|c| &**c) {
+            Some(ArrayRef::Int64(arr)) => Some(arr),
+            _ => None,
+        };
+        if let (Some(arr), Scalar::I64(lit)) = (int_column, &self.value) {
+            let op = self.op;
+            if matches!(
+                op,
+                Comparison::Eq
+                    | Comparison::NotEq
+                    | Comparison::Gt
+                    | Comparison::Gte
+                    | Comparison::Lt
+                    | Comparison::Lte
+            ) {
+                let lit = *lit;
+                return for_rows(batch.row_count(), rows, |row| match arr.value(row) {
+                    Some(x) => match op {
+                        Comparison::Eq => x == lit,
+                        Comparison::NotEq => x != lit,
+                        Comparison::Gt => x > lit,
+                        Comparison::Gte => x >= lit,
+                        Comparison::Lt => x < lit,
+                        _ => x <= lit,
+                    },
+                    None => false,
                 });
             }
         }
@@ -455,6 +563,8 @@ pub struct FilterExec {
     input: Arc<dyn PhysicalPlan>,
     predicates: Vec<Predicate>,
     schema: Arc<Schema>,
+    /// The input columns to output, in order. `None` outputs every column.
+    keep: Option<Vec<usize>>,
 }
 
 impl FilterExec {
@@ -470,7 +580,20 @@ impl FilterExec {
             input,
             predicates,
             schema,
+            keep: None,
         }
+    }
+
+    /// Output only the input columns at `keep`, in that order. A column that
+    /// only the predicates read is then not copied for the kept rows.
+    pub fn with_keep(mut self, keep: Vec<usize>) -> Self {
+        let fields = keep
+            .iter()
+            .map(|&c| self.input.schema().fields[c].clone())
+            .collect();
+        self.schema = Arc::new(Schema::new(fields));
+        self.keep = Some(keep);
+        self
     }
 }
 
@@ -482,14 +605,18 @@ impl PhysicalPlan for FilterExec {
     fn open(&self) -> Result<BatchStream, QueryError> {
         let predicates = self.predicates.clone();
         let schema = self.schema.clone();
+        let keep_cols = self.keep.clone();
         Ok(Box::new(self.input.open()?.map(move |batch| {
             let batch = batch?;
             let mut selection: Option<Vec<usize>> = None;
             for predicate in &predicates {
                 selection = Some(predicate.select_from(&batch, selection.as_deref()));
             }
-            let keep = selection.unwrap_or_else(|| (0..batch.row_count()).collect());
-            let columns: Vec<ArrayRef> = batch.columns.iter().map(|c| c.take(&keep)).collect();
+            let rows = selection.unwrap_or_else(|| (0..batch.row_count()).collect());
+            let columns: Vec<ArrayRef> = match &keep_cols {
+                Some(cols) => cols.iter().map(|&c| batch.columns[c].take(&rows)).collect(),
+                None => batch.columns.iter().map(|c| c.take(&rows)).collect(),
+            };
             Ok(Arc::new(Batch::new_unchecked(schema.clone(), columns)))
         })))
     }
@@ -499,7 +626,11 @@ impl PhysicalPlan for FilterExec {
             .predicates
             .iter()
             .map(|p| {
-                let column = self.schema.field(p.column).map_or("?", |f| f.name.as_str());
+                let column = self
+                    .input
+                    .schema()
+                    .field(p.column)
+                    .map_or("?", |f| f.name.as_str());
                 match p.op {
                     Comparison::IsNull | Comparison::IsNotNull => {
                         format!("{column} {}", p.op.symbol())
@@ -745,12 +876,117 @@ struct Probe {
     right_matched: Vec<Vec<bool>>,
 }
 
+/// The right side of a join, indexed by key: each key maps to the
+/// `(batch, row)` positions that carry it. Null keys are never stored.
+enum JoinIndex<'a> {
+    /// Any key type: a hash map from the borrowed key.
+    Hash(FastMap<KeyPart<'a>, Vec<(usize, usize)>>),
+    /// `Int64` keys in a small range (typical surrogate keys): the key is an
+    /// offset into `slots`, so a probe does no hashing.
+    Dense {
+        min: i64,
+        slots: Vec<Vec<(usize, usize)>>,
+    },
+}
+
+impl JoinIndex<'_> {
+    /// The right positions that match the left key at `row` of `col`. Empty
+    /// for a NULL key or no match.
+    #[inline]
+    fn hits<'s>(&'s self, col: &'s ArrayRef, row: usize) -> &'s [(usize, usize)] {
+        match self {
+            JoinIndex::Hash(map) => {
+                let key = key_at(col, row);
+                if key == KeyPart::Null {
+                    return &[];
+                }
+                match map.get(&key) {
+                    Some(v) => v.as_slice(),
+                    None => &[],
+                }
+            }
+            JoinIndex::Dense { min, slots } => match col {
+                ArrayRef::Int64(a) => match a.value(row) {
+                    Some(v) => {
+                        let off = v.wrapping_sub(*min) as u64;
+                        if off < slots.len() as u64 {
+                            slots[off as usize].as_slice()
+                        } else {
+                            &[]
+                        }
+                    }
+                    None => &[],
+                },
+                _ => &[],
+            },
+        }
+    }
+}
+
+/// Index the right side on `key`. Uses the direct layout when the key is an
+/// `Int64` column whose values fit in a small range; otherwise hashes.
+fn build_index(batches: &[BatchRef], key: usize) -> JoinIndex<'_> {
+    if let Some(dense) = dense_index(batches, key) {
+        return dense;
+    }
+    let mut index: FastMap<KeyPart<'_>, Vec<(usize, usize)>> = FastMap::default();
+    for (bi, batch) in batches.iter().enumerate() {
+        for row in 0..batch.row_count() {
+            let k = key_at(&batch.columns[key], row);
+            if k == KeyPart::Null {
+                continue;
+            }
+            index.entry(k).or_default().push((bi, row));
+        }
+    }
+    JoinIndex::Hash(index)
+}
+
+/// The direct layout, or `None` when the key is not `Int64` or its range is
+/// too wide for a slot per value (more than four slots per right row, plus a
+/// fixed allowance for small inputs).
+fn dense_index(batches: &[BatchRef], key: usize) -> Option<JoinIndex<'_>> {
+    let rows: usize = batches.iter().map(|b| b.row_count()).sum();
+    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+    for b in batches {
+        match &*b.columns[key] {
+            ArrayRef::Int64(a) => {
+                for row in 0..b.row_count() {
+                    if let Some(v) = a.value(row) {
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    if lo > hi {
+        return None;
+    }
+    let range = i128::from(hi) - i128::from(lo) + 1;
+    if range > (1 << 20) || range > 4 * rows as i128 + 1024 {
+        return None;
+    }
+    let mut slots: Vec<Vec<(usize, usize)>> = vec![Vec::new(); range as usize];
+    for (bi, b) in batches.iter().enumerate() {
+        if let ArrayRef::Int64(a) = &*b.columns[key] {
+            for row in 0..b.row_count() {
+                if let Some(v) = a.value(row) {
+                    slots[(v - lo) as usize].push((bi, row));
+                }
+            }
+        }
+    }
+    Some(JoinIndex::Dense { min: lo, slots })
+}
+
 /// Probe the left rows in `segs` against the right-side `index`.
 fn probe_segments(
     segs: &[Segment],
     left_batches: &[BatchRef],
     left_key: usize,
-    index: &FastMap<KeyPart<'_>, Vec<(usize, usize)>>,
+    index: &JoinIndex<'_>,
     right_rows: &[usize],
     keeps_left: bool,
 ) -> Probe {
@@ -764,25 +1000,16 @@ fn probe_segments(
         p.left_pos.reserve(end - start);
         p.right_pos.reserve(end - start);
         for row in start..end {
-            let key = key_at(&lb.columns[left_key], row);
-            let hits = if key == KeyPart::Null {
-                None
-            } else {
-                index.get(&key)
-            };
-            match hits {
-                Some(hits) if !hits.is_empty() => {
-                    for &(rbi, rrow) in hits {
-                        p.right_matched[rbi][rrow] = true;
-                        p.left_pos.push(pack(lbi, row));
-                        p.right_pos.push(pack(rbi, rrow));
-                    }
-                }
-                _ if keeps_left => {
+            let hits = index.hits(&lb.columns[left_key], row);
+            if !hits.is_empty() {
+                for &(rbi, rrow) in hits {
+                    p.right_matched[rbi][rrow] = true;
                     p.left_pos.push(pack(lbi, row));
-                    p.right_pos.push(NO_ROW);
+                    p.right_pos.push(pack(rbi, rrow));
                 }
-                _ => {}
+            } else if keeps_left {
+                p.left_pos.push(pack(lbi, row));
+                p.right_pos.push(NO_ROW);
             }
         }
     }
@@ -795,7 +1022,7 @@ fn probe_segments(
 fn probe_all(
     left_batches: &[BatchRef],
     left_key: usize,
-    index: &FastMap<KeyPart<'_>, Vec<(usize, usize)>>,
+    index: &JoinIndex<'_>,
     right_rows: &[usize],
     keeps_left: bool,
 ) -> Probe {
@@ -867,18 +1094,9 @@ impl PhysicalPlan for JoinExec {
         let left_batches = self.left.execute()?;
         let right_batches = self.right.execute()?;
 
-        // Hash the right side by key, recording (batch, row) positions.
+        // Index the right side by key, recording (batch, row) positions.
         // Keys are borrowed from the batches, so string keys are not copied.
-        let mut index: FastMap<KeyPart<'_>, Vec<(usize, usize)>> = FastMap::default();
-        for (bi, batch) in right_batches.iter().enumerate() {
-            for row in 0..batch.row_count() {
-                let key = key_at(&batch.columns[self.right_key], row);
-                if key == KeyPart::Null {
-                    continue;
-                }
-                index.entry(key).or_default().push((bi, row));
-            }
-        }
+        let index = build_index(&right_batches, self.right_key);
 
         let right_rows: Vec<usize> = right_batches.iter().map(|b| b.row_count()).collect();
         let probe = probe_all(
@@ -1186,6 +1404,46 @@ impl Condition {
 }
 
 /// Keep the rows of its input that satisfy a [`Condition`].
+impl Condition {
+    /// Add every column index the condition reads to `out`.
+    pub fn columns(&self, out: &mut Vec<usize>) {
+        match self {
+            Condition::Cmp(p) => out.push(p.column),
+            Condition::ColCmp { left, right, .. } => {
+                out.push(*left);
+                out.push(*right);
+            }
+            Condition::And(parts) | Condition::Or(parts) => {
+                for part in parts {
+                    part.columns(out);
+                }
+            }
+        }
+    }
+
+    /// The same condition with every column index mapped through `map`.
+    pub fn remap_columns(&self, map: &dyn Fn(usize) -> usize) -> Condition {
+        match self {
+            Condition::Cmp(p) => Condition::Cmp(Predicate {
+                column: map(p.column),
+                op: p.op,
+                value: p.value.clone(),
+            }),
+            Condition::ColCmp { left, op, right } => Condition::ColCmp {
+                left: map(*left),
+                op: *op,
+                right: map(*right),
+            },
+            Condition::And(parts) => {
+                Condition::And(parts.iter().map(|c| c.remap_columns(map)).collect())
+            }
+            Condition::Or(parts) => {
+                Condition::Or(parts.iter().map(|c| c.remap_columns(map)).collect())
+            }
+        }
+    }
+}
+
 pub struct CondFilterExec {
     input: Arc<dyn PhysicalPlan>,
     condition: Condition,

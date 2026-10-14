@@ -624,3 +624,33 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
       docs/benchmark-comparison.md). tpt-strata is 28× (Q1), 3.5× (Q2) and 75×
       (Q3) the hand loop. Next: a branchless or vectorised Q2 filter, and a
       join probe that does not copy row positions.
+- [x] Join probe: direct layout for small `Int64` key ranges (no hashing),
+      tested in `tests/join_index.rs`. Probe 14.5 ms → ~10 ms on 1M rows.
+      Gather (~16 ms, `Vec<Option<T>>` per column) is the next join cost.
+- [x] Single-key GROUP BY on strings: a 256-slot cache keyed by each string's
+      `Arc` address sits in front of the content hash map (`aggregate.rs`,
+      `PTR_CACHE`). Q1 24.9 → 6.2 ms on 1M rows, now faster than DataFusion on
+      one thread. High-cardinality GROUP BY is not yet measured.
+- [x] Filter on `Int64` against an `Int64` literal reads values directly
+      (`engine.rs`, `Predicate::select_from`). Q2 14.0 → 8.1 ms on 1M rows.
+- [x] Decision: string columns keep `Arc<str>`. An offset-buffer layout is a
+      breaking change to `StrArray`, and it would only help the join's string
+      gather. Revisit if that gather stays the main join cost.
+- [x] Join pushdown: a grouped inner join with right-side group keys and
+      integer SUM / COUNT / MIN / MAX over left columns aggregates the left side
+      first (`sql.rs`, `pushdown_join`). Tests in `tests/pushdown.rs`. Q3
+      38 → 7.1 ms on 1M rows, now faster than DataFusion on one thread.
+- [x] Branch-free row selection in `for_rows` (`engine.rs`): every row index
+      is written, and the length advances only on a match. Q2 9.1 → 3.0 ms on
+      1M rows, now faster than the hand loop.
+- [x] LIKE: allocation-free byte matcher, and an in-place path for `Utf8`
+      columns with the common pattern shapes (`engine.rs`, `like_kind`). Q5
+      179 → 14 ms on 1M rows. Tests in `tests/like.rs`.
+- [ ] Q5 remaining cost: the filter copies every kept row's string column,
+      though the query never reads it. Unmeasured. Candidate: let `FilterExec`
+      take only the columns needed above it.
+- [ ] Q4 (1M groups): 4× the hand loop. Per-group hashing and output are the
+      cost; not yet profiled.
+- [ ] tpt-simd (12e): published to crates.io, but still changing on GitHub.
+      Not adopted. Revisit once its API is stable, and only if a measured
+      kernel needs explicit lanes.

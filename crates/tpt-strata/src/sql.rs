@@ -1610,6 +1610,70 @@ fn project_items(
     Ok(Arc::new(ProjectExec::new(plan, exprs, out_names)?))
 }
 
+/// Every aggregate a grouped query uses, from its projections, HAVING and
+/// ORDER BY, each once and in first-use order.
+fn aggregates_of(
+    sel: &Select,
+    input: &Schema,
+    scope: &Scope,
+) -> Result<Vec<Aggregate>, QueryError> {
+    let mut aggs: Vec<Aggregate> = Vec::new();
+    for item in &sel.projections {
+        if let ProjectionItem::Expr {
+            operand: Operand::Aggregate { func, column },
+            ..
+        } = item
+        {
+            add_aggregate(&mut aggs, input, scope, *func, column.as_deref())?;
+        }
+    }
+    if let Some(c) = &sel.having {
+        let mut ops = Vec::new();
+        cond_operands(c, &mut ops);
+        for o in &ops {
+            if let Operand::Aggregate { func, column } = o {
+                add_aggregate(&mut aggs, input, scope, *func, column.as_deref())?;
+            }
+        }
+    }
+    for (o, _) in &sel.order_by {
+        if let Operand::Aggregate { func, column } = o {
+            add_aggregate(&mut aggs, input, scope, *func, column.as_deref())?;
+        }
+    }
+    Ok(aggs)
+}
+
+/// Set when a grouped inner join was rewritten to aggregate the left side
+/// first (see [`SqlContext::pushdown_join`]). `input` is the join's own output
+/// schema, which the query's names resolve against.
+pub(crate) struct Pushdown {
+    input: Schema,
+    left_width: usize,
+}
+
+/// A rewritten join, with its scope and the pushdown it carries.
+type PushedJoin = (Arc<dyn PhysicalPlan>, Scope, Pushdown);
+
+/// The final aggregates over a pushed-down join. Input `i` of the join is the
+/// partial result of `partial[i]`, at column `1 + i` (column 0 is the join key).
+/// A partial count is summed; the other functions combine as they are.
+fn final_aggregates(partial: &[Aggregate]) -> Vec<Aggregate> {
+    partial
+        .iter()
+        .enumerate()
+        .map(|(i, a)| Aggregate {
+            func: match a.func {
+                EngAggFunc::Count => EngAggFunc::Sum,
+                f => f,
+            },
+            column: 1 + i,
+            out_name: a.out_name.clone(),
+            count_star: false,
+        })
+        .collect()
+}
+
 fn has_aggregates(sel: &Select) -> bool {
     sel.projections.iter().any(|p| {
         matches!(
@@ -1698,8 +1762,14 @@ fn plan_grouped(
     plan: Arc<dyn PhysicalPlan>,
     scope: &Scope,
     sel: &Select,
+    pushdown: Option<&Pushdown>,
 ) -> Result<Arc<dyn PhysicalPlan>, QueryError> {
-    let input = plan.schema().clone();
+    // With a pushdown, names resolve against the join's own output schema, and
+    // `plan` is the rewritten join. See `pushdown_join`.
+    let input = match pushdown {
+        Some(pd) => pd.input.clone(),
+        None => plan.schema().clone(),
+    };
 
     // DISTINCT over plain columns is a GROUP BY over those columns.
     let group_names: Vec<String> = if !sel.group_by.is_empty() {
@@ -1724,52 +1794,37 @@ fn plan_grouped(
         .map(|n| resolve(&input, scope, n))
         .collect::<Result<_, _>>()?;
 
-    // Collect every aggregate the query uses, including ones that only
-    // appear in HAVING or ORDER BY.
-    let mut aggs: Vec<Aggregate> = Vec::new();
     for item in &sel.projections {
-        match item {
-            ProjectionItem::Wild => {}
-            ProjectionItem::Expr {
-                operand: Operand::Column(name),
-                ..
-            } => {
-                let idx = resolve(&input, scope, name)?;
-                if !group_idx.contains(&idx) {
-                    let bare = name.rsplit('.').next().unwrap_or(name);
-                    return Err(QueryError::UnsupportedOperation {
-                        message: format!(
-                            "column '{bare}' must appear in the GROUP BY clause or be used in an aggregate function"
-                        ),
-                    });
-                }
-            }
-            ProjectionItem::Expr {
-                operand: Operand::Aggregate { func, column },
-                ..
-            } => {
-                add_aggregate(&mut aggs, &input, scope, *func, column.as_deref())?;
+        if let ProjectionItem::Expr {
+            operand: Operand::Column(name),
+            ..
+        } = item
+        {
+            let idx = resolve(&input, scope, name)?;
+            if !group_idx.contains(&idx) {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                return Err(QueryError::UnsupportedOperation {
+                    message: format!(
+                        "column '{bare}' must appear in the GROUP BY clause or be used in an aggregate function"
+                    ),
+                });
             }
         }
     }
-    if let Some(c) = &sel.having {
-        let mut ops = Vec::new();
-        cond_operands(c, &mut ops);
-        for o in &ops {
-            if let Operand::Aggregate { func, column } = o {
-                add_aggregate(&mut aggs, &input, scope, *func, column.as_deref())?;
-            }
-        }
-    }
-    for (o, _) in &sel.order_by {
-        if let Operand::Aggregate { func, column } = o {
-            add_aggregate(&mut aggs, &input, scope, *func, column.as_deref())?;
-        }
-    }
+    let aggs = aggregates_of(sel, &input, scope)?;
 
-    let agg_plan: Arc<dyn PhysicalPlan> = Arc::new(AggregateExec::new(plan, group_idx, aggs)?);
-    let agg_schema = agg_plan.schema().clone();
-    let mut plan = agg_plan;
+    let (group_by, agg_list) = match pushdown {
+        Some(pd) => (
+            group_idx
+                .iter()
+                .map(|&g| g - pd.left_width + 1 + aggs.len())
+                .collect(),
+            final_aggregates(&aggs),
+        ),
+        None => (group_idx, aggs),
+    };
+    let mut agg = AggregateExec::new(plan, group_by, agg_list)?;
+    let agg_schema = agg.schema().clone();
 
     // Resolve an operand against the aggregate output. A bare name may also
     // be an alias, which takes precedence in HAVING and ORDER BY.
@@ -1792,10 +1847,12 @@ fn plan_grouped(
         }
     };
 
+    // HAVING runs inside the aggregate, so rejected groups are never built.
     if let Some(c) = &sel.having {
         let cond = bind_cond(c, &|op: &Operand| agg_ref(op, true), &agg_schema)?;
-        plan = apply_filter(plan, cond);
+        agg = agg.with_having(cond);
     }
+    let mut plan: Arc<dyn PhysicalPlan> = Arc::new(agg);
 
     if !sel.order_by.is_empty() {
         let mut keys = Vec::with_capacity(sel.order_by.len());
@@ -1892,6 +1949,10 @@ impl<'a> SqlContext<'a> {
         let left_owned = prune(left_base, &sel.from, needed.as_deref());
         let left = &left_owned;
 
+        if let Some((plan, scope, pushdown)) = self.pushdown_join(&sel, left, needed.as_deref())? {
+            return self.finish_plan(&sel, plan, &scope, Some(&pushdown));
+        }
+
         let mut tables = vec![sel.from.clone()];
         let mut plan: Arc<dyn PhysicalPlan> = if sel.joins.is_empty() {
             Arc::new(DataSource::from_shared(
@@ -1928,24 +1989,35 @@ impl<'a> SqlContext<'a> {
             tables,
             joined: !sel.joins.is_empty(),
         };
+        self.finish_plan(&sel, plan, &scope, None)
+    }
 
+    /// The part of a query above its joins: filter, group or project, then
+    /// limit. `pushdown` is set when the joins were rewritten (see
+    /// [`SqlContext::pushdown_join`]).
+    fn finish_plan(
+        &self,
+        sel: &Select,
+        mut plan: Arc<dyn PhysicalPlan>,
+        scope: &Scope,
+        pushdown: Option<&Pushdown>,
+    ) -> Result<Arc<dyn PhysicalPlan>, QueryError> {
         if let Some(c) = &sel.filter {
             let cond = bind_cond(
                 c,
-                &|op: &Operand| resolve_operand(op, plan.schema(), &scope),
+                &|op: &Operand| resolve_operand(op, plan.schema(), scope),
                 plan.schema(),
             )?;
-            plan = apply_filter(plan, cond);
+            let keep = filter_keep(sel, scope, plan.schema());
+            plan = apply_filter(plan, cond, keep);
         }
 
-        let grouped = has_aggregates(&sel)
-            || !sel.group_by.is_empty()
-            || sel.having.is_some()
-            || sel.distinct;
+        let grouped =
+            has_aggregates(sel) || !sel.group_by.is_empty() || sel.having.is_some() || sel.distinct;
         plan = if grouped {
-            plan_grouped(plan, &scope, &sel)?
+            plan_grouped(plan, scope, sel, pushdown)?
         } else {
-            plan_plain(plan, &scope, &sel)?
+            plan_plain(plan, scope, sel)?
         };
 
         if sel.limit.is_some() || sel.offset.is_some() {
@@ -1956,6 +2028,102 @@ impl<'a> SqlContext<'a> {
             ));
         }
         Ok(plan)
+    }
+
+    /// Rewrite a grouped inner join so the left side is aggregated first.
+    ///
+    /// The query must be `FROM left JOIN right ON … GROUP BY <right columns>`
+    /// with no WHERE or DISTINCT, and with SUM, COUNT, MIN or MAX over left
+    /// columns (or `COUNT(*)`). Then the result is the same as joining first:
+    /// each left value is counted once per matching right row, and a partial
+    /// SUM, COUNT or MIN/MAX over a join key combines the same way. The join
+    /// then carries one row per key instead of one per left row, so the group
+    /// key's strings are copied only for those rows.
+    ///
+    /// SUM is limited to integers, so reordering the additions cannot change a
+    /// result. Returns `None` for any other shape; the caller plans it as before.
+    fn pushdown_join(
+        &self,
+        sel: &Select,
+        left: &Table,
+        needed: Option<&[String]>,
+    ) -> Result<Option<PushedJoin>, QueryError> {
+        if sel.joins.len() != 1
+            || sel.joins[0].kind != JoinKind::Inner
+            || sel.filter.is_some()
+            || sel.distinct
+            || sel.group_by.is_empty()
+        {
+            return Ok(None);
+        }
+        let join = &sel.joins[0];
+        let left_src = qualified_source(left, &sel.from);
+        let right = prune(self.lookup(&join.right)?, &join.right, needed);
+        let right_src = qualified_source(&right, &join.right);
+
+        let lw = left_src.schema().len();
+        let mut fields = left_src.schema().fields.clone();
+        fields.extend(right_src.schema().fields.iter().cloned());
+        let input = Schema::new(fields);
+        let scope = Scope {
+            tables: vec![sel.from.clone(), join.right.clone()],
+            joined: true,
+        };
+
+        // Group keys must come from the right table; anything else falls back.
+        for name in &sel.group_by {
+            match resolve(&input, &scope, name) {
+                Ok(idx) if idx >= lw => {}
+                _ => return Ok(None),
+            }
+        }
+        let Ok(aggs) = aggregates_of(sel, &input, &scope) else {
+            return Ok(None);
+        };
+        for agg in &aggs {
+            if agg.func == EngAggFunc::Avg {
+                return Ok(None);
+            }
+            if agg.count_star {
+                continue;
+            }
+            if agg.column >= lw {
+                return Ok(None);
+            }
+            let sum_is_integer = matches!(
+                left_src.schema().field(agg.column).map(|f| f.data_type),
+                Some(DataType::Int32 | DataType::Int64)
+            );
+            if agg.func == EngAggFunc::Sum && !sum_is_integer {
+                return Ok(None);
+            }
+        }
+
+        let tables = vec![sel.from.clone()];
+        let Ok((lk, rk)) = join_keys(
+            left_src.schema(),
+            &tables,
+            &right,
+            &join.right,
+            &join.on.0,
+            &join.on.1,
+        ) else {
+            return Ok(None);
+        };
+
+        let partial: Arc<dyn PhysicalPlan> =
+            Arc::new(AggregateExec::new(left_src, vec![lk], aggs.clone())?);
+        let plan: Arc<dyn PhysicalPlan> = Arc::new(JoinExec::try_new_join(
+            partial, right_src, 0, rk, join.kind,
+        )?);
+        Ok(Some((
+            plan,
+            scope,
+            Pushdown {
+                input,
+                left_width: lw,
+            },
+        )))
     }
 
     /// Parse and execute `sql`, returning the result table.
@@ -2085,9 +2253,23 @@ fn top_k(sel: &Select) -> Option<usize> {
 /// Apply a bound condition. A conjunction of plain comparisons becomes one
 /// fused filter, which keeps the typed fast path and copies the columns once.
 /// Anything else is a condition tree in one filter.
-fn apply_filter(plan: Arc<dyn PhysicalPlan>, cond: Condition) -> Arc<dyn PhysicalPlan> {
+///
+/// `keep` lists the columns to output, when the query reads only some of them
+/// above the filter (see [`filter_keep`]). A condition tree is not pruned,
+/// which is correct, just not as lean.
+fn apply_filter(
+    plan: Arc<dyn PhysicalPlan>,
+    cond: Condition,
+    keep: Option<Vec<usize>>,
+) -> Arc<dyn PhysicalPlan> {
+    let with_keep = |filter: FilterExec| -> Arc<dyn PhysicalPlan> {
+        match &keep {
+            Some(cols) => Arc::new(filter.with_keep(cols.clone())),
+            None => Arc::new(filter),
+        }
+    };
     match cond {
-        Condition::Cmp(p) => Arc::new(FilterExec::new(plan, p)),
+        Condition::Cmp(p) => with_keep(FilterExec::new(plan, p)),
         Condition::And(parts) if parts.iter().all(|c| matches!(c, Condition::Cmp(_))) => {
             let predicates = parts
                 .into_iter()
@@ -2096,8 +2278,31 @@ fn apply_filter(plan: Arc<dyn PhysicalPlan>, cond: Condition) -> Arc<dyn Physica
                     _ => None,
                 })
                 .collect();
-            Arc::new(FilterExec::new_all(plan, predicates))
+            with_keep(FilterExec::new_all(plan, predicates))
         }
         other => Arc::new(CondFilterExec::new(plan, other)),
+    }
+}
+
+/// The input columns the query reads above its WHERE clause: projections,
+/// GROUP BY, HAVING and ORDER BY. A column that only WHERE reads is left out,
+/// so the filter does not copy it. `None` when nothing can be dropped, or a
+/// name does not resolve (the ordinary plan then reports the error).
+fn filter_keep(sel: &Select, scope: &Scope, schema: &Schema) -> Option<Vec<usize>> {
+    let above = Select {
+        filter: None,
+        ..sel.clone()
+    };
+    let refs = needed_refs(&above)?;
+    let mut cols: Vec<usize> = Vec::with_capacity(refs.len());
+    for r in &refs {
+        cols.push(resolve(schema, scope, r).ok()?);
+    }
+    cols.sort_unstable();
+    cols.dedup();
+    if cols.len() == schema.len() {
+        None
+    } else {
+        Some(cols)
     }
 }

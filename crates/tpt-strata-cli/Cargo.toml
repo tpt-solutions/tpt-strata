@@ -8,6 +8,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
+keywords = ["sql", "parquet", "csv", "cli", "tpt-strata"]
+categories = ["command-line-utilities", "database"]
+readme = "README.md"
 # Not yet released. Remove this line when the crate is ready to publish.
 publish = false
 
