@@ -13,10 +13,11 @@ use std::sync::Arc;
 
 use crate::array::{ArrayRef, F64Array, I64Array};
 use crate::batch::{Batch, BatchRef};
-use crate::engine::{gather_opt, names, push_line, Condition, PhysicalPlan};
+use crate::engine::{gather_opt, names, push_line, Comparison, Condition, PhysicalPlan, Predicate};
 use crate::error::QueryError;
 use crate::key::{key_at, FastMap, KeyPart};
 use crate::schema::{DataType, Field, Schema};
+use crate::types::Scalar;
 
 /// Whether a data type is orderable for `MIN`/`MAX` (and `ORDER BY`).
 ///
@@ -545,6 +546,11 @@ impl AggregateExec {
         batches: &[BatchRef],
     ) -> Result<Vec<usize>, QueryError> {
         let groups = first.len();
+        if let Condition::Cmp(p) = condition {
+            if let Some(keep) = self.having_on_sum(p, groups, states) {
+                return Ok(keep);
+            }
+        }
         let all: Vec<usize> = (0..groups).collect();
         let mut referenced = Vec::new();
         condition.columns(&mut referenced);
@@ -565,10 +571,249 @@ impl AggregateExec {
         let probe_index = |j: usize| referenced.binary_search(&j).unwrap_or(0);
         let condition = condition.remap_columns(&probe_index);
         let probe = Batch::new_unchecked(self.schema.clone(), columns);
-        Ok((0..groups)
-            .filter(|&g| condition.matches(&probe, g))
-            .collect())
+        Ok(select_condition(&condition, &probe, None, groups))
     }
+}
+
+impl AggregateExec {
+    /// HAVING on an integer `SUM` against an integer literal, decided from the
+    /// accumulators directly, so no output column is built for every group.
+    /// Returns `None` when the condition is another shape, or when a sum is
+    /// outside `i64`: the general path reports that overflow as an error.
+    fn having_on_sum(
+        &self,
+        p: &Predicate,
+        groups: usize,
+        states: &[AggState],
+    ) -> Option<Vec<usize>> {
+        let key_count = self.group_by.len();
+        let (Scalar::I64(lit), true) = (&p.value, p.column >= key_count) else {
+            return None;
+        };
+        let AggState::Sum {
+            as_float: false,
+            int,
+            saw,
+            ..
+        } = &states[p.column - key_count]
+        else {
+            return None;
+        };
+        let lit = i128::from(*lit);
+        let mut keep = Vec::new();
+        for g in 0..groups {
+            if !saw[g] {
+                continue;
+            }
+            let v = int[g];
+            if i64::try_from(v).is_err() {
+                return None;
+            }
+            let hit = match p.op {
+                Comparison::Eq => v == lit,
+                Comparison::NotEq => v != lit,
+                Comparison::Gt => v > lit,
+                Comparison::Gte => v >= lit,
+                Comparison::Lt => v < lit,
+                Comparison::Lte => v <= lit,
+                _ => return None,
+            };
+            if hit {
+                keep.push(g);
+            }
+        }
+        Some(keep)
+    }
+}
+
+/// The rows of `batch` (or of `rows`, when given) that satisfy `condition`, in
+/// order. A comparison and an `AND` of comparisons use the predicate's typed
+/// path, which reads the column directly. Other conditions check each row.
+fn select_condition(
+    condition: &Condition,
+    batch: &Batch,
+    rows: Option<&[usize]>,
+    n: usize,
+) -> Vec<usize> {
+    match condition {
+        Condition::Cmp(p) => p.select_from(batch, rows),
+        Condition::And(parts) => {
+            let mut current: Option<Vec<usize>> = None;
+            for part in parts {
+                let next = select_condition(part, batch, current.as_deref().or(rows), n);
+                current = Some(next);
+            }
+            current.unwrap_or_else(|| match rows {
+                Some(r) => r.to_vec(),
+                None => (0..n).collect(),
+            })
+        }
+        _ => match rows {
+            Some(r) => r
+                .iter()
+                .copied()
+                .filter(|&g| condition.matches(batch, g))
+                .collect(),
+            None => (0..n).filter(|&g| condition.matches(batch, g)).collect(),
+        },
+    }
+}
+
+/// The groups and states an aggregate produces: first rows, then states.
+type AggOutput = (Vec<Option<(usize, usize)>>, Vec<AggState>);
+
+/// Accumulators for a dense single-key aggregate: groups in first-seen order,
+/// with `naggs` values per group in `int`, `saw` and `count`.
+#[derive(Default)]
+struct DenseGroups {
+    /// The key of each group, `None` for the NULL group.
+    keys: Vec<Option<i64>>,
+    /// `(batch, row)` of the first row of each group.
+    first: Vec<(usize, usize)>,
+    int: Vec<i128>,
+    saw: Vec<bool>,
+    count: Vec<i64>,
+}
+
+impl DenseGroups {
+    /// Add a group, with its accumulators at zero, and return its index.
+    fn push(&mut self, key: Option<i64>, first: (usize, usize), naggs: usize) -> usize {
+        self.keys.push(key);
+        self.first.push(first);
+        for _ in 0..naggs {
+            self.int.push(0);
+            self.saw.push(false);
+            self.count.push(0);
+        }
+        self.first.len() - 1
+    }
+}
+
+/// The aggregates a dense single-key pass can compute: integer sums and counts.
+#[derive(Clone, Copy)]
+enum DenseKind {
+    Sum { col: usize },
+    Count { col: usize, count_star: bool },
+}
+
+/// Aggregate one worker's segments. The key range covered is taken from these
+/// segments alone, so the slot table is small even when the whole input's key
+/// range is large. Groups are created in first-seen order.
+fn dense_worker(
+    batches: &[BatchRef],
+    segs: &[Segment],
+    key: usize,
+    kinds: &[DenseKind],
+) -> DenseGroups {
+    let naggs = kinds.len();
+    let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+    for &(bi, start, end) in segs {
+        if let ArrayRef::Int64(a) = &*batches[bi].columns[key] {
+            for row in start..end {
+                if let Some(v) = a.value(row) {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+        }
+    }
+    let span = if lo > hi {
+        0
+    } else {
+        (i128::from(hi) - i128::from(lo) + 1) as usize
+    };
+    let mut slot = vec![NO_GROUP; span];
+    let mut null_group = NO_GROUP;
+    let mut groups = DenseGroups::default();
+    let mut gids: Vec<usize> = Vec::new();
+    for &(bi, start, end) in segs {
+        let batch = &batches[bi];
+        gids.clear();
+        for row in start..end {
+            let value = match &*batch.columns[key] {
+                ArrayRef::Int64(a) => a.value(row),
+                _ => None,
+            };
+            let gid = match value {
+                Some(v) => {
+                    let off = (v - lo) as usize;
+                    if slot[off] == NO_GROUP {
+                        slot[off] = groups.push(Some(v), (bi, row), naggs);
+                    }
+                    slot[off]
+                }
+                None => {
+                    if null_group == NO_GROUP {
+                        null_group = groups.push(None, (bi, row), naggs);
+                    }
+                    null_group
+                }
+            };
+            gids.push(gid);
+        }
+        for (a, kind) in kinds.iter().enumerate() {
+            match *kind {
+                DenseKind::Sum { col } => match &*batch.columns[col] {
+                    ArrayRef::Int32(c) => {
+                        for (k, &g) in gids.iter().enumerate() {
+                            if let Some(v) = c.value(start + k) {
+                                groups.int[g * naggs + a] += i128::from(v);
+                                groups.saw[g * naggs + a] = true;
+                            }
+                        }
+                    }
+                    ArrayRef::Int64(c) => {
+                        for (k, &g) in gids.iter().enumerate() {
+                            if let Some(v) = c.value(start + k) {
+                                groups.int[g * naggs + a] += i128::from(v);
+                                groups.saw[g * naggs + a] = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                DenseKind::Count { col, count_star } => {
+                    let column = &batch.columns[col];
+                    for (k, &g) in gids.iter().enumerate() {
+                        if count_star || !column.is_null(start + k) {
+                            groups.count[g * naggs + a] += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    groups
+}
+
+/// Run `dense_worker` over the segments: on one thread, or split into
+/// contiguous runs across threads when the `parallel` feature is on.
+fn dense_workers(
+    batches: &[BatchRef],
+    segs: &[Segment],
+    key: usize,
+    kinds: &[DenseKind],
+) -> Vec<DenseGroups> {
+    #[cfg(feature = "parallel")]
+    {
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(segs.len());
+        if threads > 1 {
+            let per = segs.len().div_ceil(threads);
+            return std::thread::scope(|scope| {
+                let workers: Vec<_> = segs
+                    .chunks(per)
+                    .map(|chunk| scope.spawn(move || dense_worker(batches, chunk, key, kinds)))
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                    .collect()
+            });
+        }
+    }
+    vec![dense_worker(batches, segs, key, kinds)]
 }
 
 /// Rows per unit of aggregation work. Segments are the unit that threads
@@ -818,6 +1063,126 @@ impl AggregateExec {
         vec![self.run_segments(batches, segs, dense)]
     }
 
+    /// The dense path for a single integer key, when every aggregate is an
+    /// integer `SUM` or a `COUNT`. Returns the same groups, states and order as
+    /// the general path, or `None` when the aggregates do not qualify.
+    fn dense_aggregate(
+        &self,
+        batches: &[BatchRef],
+        segs: &[Segment],
+        key: usize,
+        min: i64,
+        range: usize,
+    ) -> Option<AggOutput> {
+        let input = self.input.schema();
+        let kinds: Vec<DenseKind> = self
+            .aggregates
+            .iter()
+            .map(|a| match a.func {
+                AggFunc::Sum => match input.field(a.column).map(|f| f.data_type) {
+                    Some(DataType::Int32 | DataType::Int64) => Some(DenseKind::Sum { col: a.column }),
+                    _ => None,
+                },
+                AggFunc::Count => Some(DenseKind::Count {
+                    col: a.column,
+                    count_star: a.count_star,
+                }),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        let naggs = kinds.len();
+
+        // Merge the workers in order. Each group keeps the earliest first row
+        // seen across workers, which is the row the general path would keep.
+        let workers_out = dense_workers(batches, segs, key, &kinds);
+        // Each worker's groups are merged in, so their total bounds the output.
+        // The vectors are sized for that bound and filled by index: the output
+        // needs no key, and no group is pushed one at a time.
+        let cap: usize = workers_out.iter().map(|w| w.first.len()).sum();
+        let mut first = vec![(usize::MAX, usize::MAX); cap];
+        let mut int = vec![0i128; cap * naggs];
+        let mut saw = vec![false; cap * naggs];
+        let mut count = vec![0i64; cap * naggs];
+        let mut groups = 0;
+        let mut slot = vec![NO_GROUP; range];
+        let mut null_group = NO_GROUP;
+        for worker in workers_out {
+            for (lg, key_value) in worker.keys.iter().enumerate() {
+                let g = match *key_value {
+                    Some(v) => {
+                        let off = (v - min) as usize;
+                        if slot[off] == NO_GROUP {
+                            slot[off] = groups;
+                            groups += 1;
+                        }
+                        slot[off]
+                    }
+                    None => {
+                        if null_group == NO_GROUP {
+                            null_group = groups;
+                            groups += 1;
+                        }
+                        null_group
+                    }
+                };
+                first[g] = first[g].min(worker.first[lg]);
+                let (src, dst) = (lg * naggs, g * naggs);
+                for a in 0..naggs {
+                    int[dst + a] += worker.int[src + a];
+                    saw[dst + a] |= worker.saw[src + a];
+                    count[dst + a] += worker.count[src + a];
+                }
+            }
+        }
+        first.truncate(groups);
+        int.truncate(groups * naggs);
+        saw.truncate(groups * naggs);
+        count.truncate(groups * naggs);
+        let totals = DenseGroups {
+            keys: Vec::new(),
+            first,
+            int,
+            saw,
+            count,
+        };
+
+        // First-seen order: each group's first row is unique, so a table over
+        // all rows, indexed by row, lists the groups in that order.
+        let mut offsets = Vec::with_capacity(batches.len());
+        let mut total_rows = 0;
+        for batch in batches {
+            offsets.push(total_rows);
+            total_rows += batch.row_count();
+        }
+        let mut by_row = vec![NO_GROUP; total_rows];
+        for (g, &(bi, row)) in totals.first.iter().enumerate() {
+            by_row[offsets[bi] + row] = g;
+        }
+        let order: Vec<usize> = by_row.into_iter().filter(|&g| g != NO_GROUP).collect();
+
+        let first = order.iter().map(|&g| Some(totals.first[g])).collect();
+        let states = kinds
+            .iter()
+            .enumerate()
+            .map(|(a, kind)| match *kind {
+                DenseKind::Sum { col } => AggState::Sum {
+                    col,
+                    label: self.aggregates[a].out_name.clone(),
+                    as_float: false,
+                    int: order.iter().map(|&g| totals.int[g * naggs + a]).collect(),
+                    float: Vec::new(),
+                    saw: order.iter().map(|&g| totals.saw[g * naggs + a]).collect(),
+                },
+                DenseKind::Count { col, count_star } => AggState::Count {
+                    col,
+                    count_star,
+                    n: order.iter().map(|&g| totals.count[g * naggs + a]).collect(),
+                },
+            })
+            .collect();
+        Some((first, states))
+    }
+
     /// Merge partials, in order, into one set of groups and states. A group
     /// keeps the position where the sequential pass first saw it.
     fn merge_partials(
@@ -828,7 +1193,13 @@ impl AggregateExec {
     ) -> (Vec<Option<(usize, usize)>>, Vec<AggState>) {
         let global = self.group_by.is_empty();
         let mut states = self.new_states();
-        let mut first: Vec<Option<(usize, usize)>> = Vec::new();
+        // Every partial group is merged once, so the total bounds the output:
+        // reserve up front instead of growing each vector as groups arrive.
+        let total: usize = partials.iter().map(|p| p.first.len()).sum();
+        let mut first: Vec<Option<(usize, usize)>> = Vec::with_capacity(total);
+        for s in &mut states {
+            s.reserve(total);
+        }
         let mut index: FastMap<Vec<KeyPart<'_>>, usize> = FastMap::default();
         // With one group column, index on the key itself, as the segment pass
         // does: no per-group Vec.
@@ -934,12 +1305,21 @@ impl PhysicalPlan for AggregateExec {
             [c] => int_key_range(&batches, *c),
             _ => None,
         };
-        let mut partials = self.run_partials(&batches, &segs, dense);
-        let (first, states) = if partials.len() == 1 {
-            let only = partials.remove(0);
-            (only.first, only.states)
-        } else {
-            self.merge_partials(&batches, partials, dense)
+        let fast = match (self.group_by.as_slice(), dense) {
+            ([c], Some((min, range))) => self.dense_aggregate(&batches, &segs, *c, min, range),
+            _ => None,
+        };
+        let (first, states) = match fast {
+            Some(out) => out,
+            None => {
+                let mut partials = self.run_partials(&batches, &segs, dense);
+                if partials.len() == 1 {
+                    let only = partials.remove(0);
+                    (only.first, only.states)
+                } else {
+                    self.merge_partials(&batches, partials, dense)
+                }
+            }
         };
 
         // The groups to output, in order: all of them, or those HAVING keeps.

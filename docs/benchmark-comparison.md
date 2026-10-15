@@ -112,6 +112,54 @@ all cores. Q2 was 4.68 ms in the run with timers and 3.35 ms here, so its
 run-to-run spread is wide; treat it as about 1.5× DataFusion, not a
 precise figure. Q4 is about 2.3× DataFusion and 3× DuckDB on all cores.
 
+### Dense fast path and HAVING on accumulators (2026-10-14)
+
+Two changes for Q4, both measured in the parallel build:
+- A dense single-key path for integer `SUM` and `COUNT`. Each worker aggregates
+  its own segments into arrays over only the keys those segments hold. The
+  merge keeps the first-seen order, and `tests/dense_fast_path.rs` checks the
+  results against a plain pass over three batches with NULLs and negative keys.
+- HAVING on an integer `SUM` against an integer literal is decided from the
+  accumulators, so no output column is built for every group. Timed with
+  temporary timers (removed), this step went from about 15 ms to about 2.5 ms.
+
+Phase timings before the HAVING change, from temporary timers (removed):
+workers about 14 ms, merge about 20 ms (down from about 32 ms after reserving
+the merge's vectors), ordering about 3 ms.
+
+| query | tpt-strata (parallel) | DataFusion (all cores) |
+|---|---|---|
+| Q1 group by + 3 aggregates | 2.29 ms | 3.54 ms |
+| Q2 filter + sort + limit | 3.36 ms | 1.72 ms |
+| Q3 join + group by | 4.71 ms | 3.72 ms |
+| Q4 group by id (1M groups) | 54.8 ms | 29.7 ms |
+| Q5 LIKE filter, count and sum | 4.00 ms | 2.30 ms |
+
+Q4 is about 1.85× DataFusion on all cores. Q2 is about 2×, and Q5 about 1.7×.
+Across runs the machine speed moves by up to about 2×, so compare ratios within
+a run.
+
+### Q4 after reserving the merge and typed HAVING (2026-10-14)
+
+Two changes, both measured in the parallel build:
+- The merge reserves its output vectors up front, since the total group count
+  is known. Q4 went from about 73 ms to 66 ms.
+- HAVING now runs on the typed path for a comparison, and for an `AND` of
+  comparisons. It used to check each of the 1,000,000 groups through a boxed
+  `Scalar`. Q4 went from 66 ms to 53 ms.
+
+| query | tpt-strata (parallel) | DataFusion (all cores) | DuckDB (all cores) |
+|---|---|---|---|
+| Q1 group by + 3 aggregates | 2.41 ms | 3.18 ms | - |
+| Q2 filter + sort + limit | 3.39 ms | 1.70 ms | - |
+| Q3 join + group by | 2.22 ms | 3.56 ms | - |
+| Q4 group by id (1M groups) | 52.7 ms | 30.6 ms | 23.7 ms |
+| Q5 LIKE filter, count and sum | 3.88 ms | 2.25 ms | - |
+
+Q4 is about 1.7× DataFusion on all cores, down from 2.3×. Q2 is about 2×, and
+Q5 about 1.7×. The remaining Q4 cost is still per group: the partial pass and
+the merge each touch all 1,000,000 groups, with a few vector pushes per group.
+
 ### Parallel merge with a single-key index (2026-10-14)
 
 The merge now indexes a single group column on the key itself, as the segment
@@ -126,6 +174,12 @@ hand loop, so compare ratios within this table:
 | Q3 join + group by | 2.60 ms | 0.71 ms | 4.12 ms | 4.93 ms |
 | Q4 group by id (1M groups) | 166 ms | 3.57 ms | 30.0 ms | 21.7 ms |
 | Q5 LIKE filter, count and sum | 9.56 ms | 1.87 ms | 2.45 ms | 2.74 ms |
+
+Timed with temporary timers (removed afterwards), Q4's parallel build spends
+about 20 ms in the partial pass and about 35 ms in the merge, out of roughly
+80 ms for the run. The merge is still the largest part: it visits each of the
+1,000,000 groups once per partial and makes random accesses into the slot
+table. Merging in parallel by key range is the next step, and it is not done.
 
 Q4 fell from 564 ms to 166 ms in the parallel build, and it still trails
 DataFusion and DuckDB on all cores by about 5× and 8×. The machine was faster
