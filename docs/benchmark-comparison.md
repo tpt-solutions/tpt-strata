@@ -950,3 +950,11 @@ small key range, which is one reason the change was not kept.
 The merge is still the largest Q4 stage. Options not yet tried: a per-group
 state that is 16 bytes or less, and output vectors built directly from the
 workers' ranges.
+
+### Skipping the first-seen sort when groups are already in order (tried, not kept, 2026-10-16)
+
+When the merged groups are already sorted by their first row, the by-row table
+and the sort can be skipped. Q4 qualifies. Minimum of 15 runs, twice, against
+HEAD: 35.6 vs 35.5 ms and 34.6 vs 34.6 ms. No measurable gain, so it was
+reverted. The stage timers had overstated that step, which is why this was
+measured end to end before keeping anything.
