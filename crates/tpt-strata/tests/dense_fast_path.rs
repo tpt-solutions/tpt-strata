@@ -142,3 +142,30 @@ fn dense_having_on_a_sum_keeps_the_same_groups_as_a_plain_pass() {
     assert!(!want.is_empty() && want.len() < all.len());
     assert_eq!(rows(&out), want);
 }
+
+#[test]
+fn dense_sum_overflow_is_reported_not_wrapped() {
+    // Keys 0..4 are dense. Each group's SUM is 3 * (i64::MAX / 2), which does
+    // not fit in i64, so the query must fail as the general path does.
+    let big = i64::MAX / 2;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let keys: Vec<i64> = (0..12).map(|i| i % 4).collect();
+    let values: Vec<i64> = vec![big; 12];
+    let batch = Batch::try_new(
+        schema.clone(),
+        vec![
+            ArrayRef::Int64(I64Array::new(keys)),
+            ArrayRef::Int64(I64Array::new(values)),
+        ],
+    )
+    .unwrap();
+    let t = Table::from_batches(schema, vec![batch]);
+    let mut ctx = SqlContext::new();
+    ctx.add_table("t", &t);
+    assert!(ctx
+        .run("SELECT k, SUM(v) AS total FROM t GROUP BY k")
+        .is_err());
+}

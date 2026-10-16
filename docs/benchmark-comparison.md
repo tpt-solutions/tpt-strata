@@ -136,6 +136,56 @@ the merge's vectors), ordering about 3 ms.
 | Q5 LIKE filter, count and sum | 4.00 ms | 2.30 ms |
 
 Q4 is about 1.85× DataFusion on all cores. Q2 is about 2×, and Q5 about 1.7×.
+
+### Partitioned merge: tried, no gain (2026-10-14)
+
+Each worker lists its groups by key bucket, and one merge thread per bucket
+merges only its own groups. The NULL group is merged after the buckets. Tests
+and clippy pass, and the results match. Q4 did not improve: 49.3 ms, against
+43.3 ms with the narrower records alone, and about 8% worse against the hand
+loop. The machine ran a little slower in this run (the hand loop is about 5%
+slower), so the regression may be partly noise. The bucket lists grow from
+empty in every worker, which adds allocation and page-fault work, the same
+cost that slowed the workers before. That is a guess, not measured.
+
+### Narrower group records (2026-10-14)
+
+The dense path's group records are narrower: keys are plain `i64`, first rows
+are packed into one `u64`, and integer sums are `i64` with an overflow check.
+An overflow takes the general path, which reports it as before. The records
+went from about 57 bytes per group to about 33.
+
+| query | tpt-strata (parallel) | hand loop (1 thread) | DataFusion (all cores) |
+|---|---|---|---|
+| Q1 group by + 3 aggregates | 2.28 ms | 0.98 ms | 4.11 ms |
+| Q2 filter + sort + limit | 4.35 ms | 4.07 ms | 1.94 ms |
+| Q3 join + group by | 4.95 ms | 0.71 ms | 4.44 ms |
+| Q4 group by id (1M groups) | 43.3 ms | 3.05 ms | 31.1 ms |
+| Q5 LIKE filter, count and sum | 4.67 ms | 2.18 ms | 2.12 ms |
+
+Q4 is about 1.4× DataFusion here, against about 1.8× in the previous run. The
+machine moved between runs, and against the hand-loop floor the gain is about
+8%, so treat it as a modest improvement, not a confirmed one.
+
+Worker scaling for Q4 (temporary timers, removed): in the default single-thread
+build, the one worker over all 1M rows takes about 16 ns per row. In the
+parallel build, each worker over its 64k-row segment takes about 8–9 ms, about
+130 ns per row. The parallel stage therefore barely speeds up: Q4's aggregation
+is about 57 ms on one thread and about 50 ms on all cores. DataFusion gains
+about 2.2× from its threads on the same query. A probe program showed that
+plain arithmetic scales across 16 threads on this machine, and that fresh
+allocation and page faulting slow down about 4× when 16 threads do it at once.
+That accounts for about 2 ms of each worker's time. The rest is not yet
+explained. Pre-sizing the worker vectors made no difference.
+
+Merge breakdown for Q4 (temporary timers, removed): allocating and filling the
+merge's vectors takes about 3 ms, the merge loop about 14 to 17 ms, and the
+ordering under 1 ms. The loop moves roughly 100 bytes per group across the
+worker records, the slot table and the merged arrays. It is limited by memory
+traffic, not by per-group work. Filling the output vectors by index instead of
+pushing made no measurable difference (53.9 ms against 54.8 ms). Narrower
+records would help a little. Closing the gap to DataFusion needs a different
+layout for dense groups.
 Across runs the machine speed moves by up to about 2×, so compare ratios within
 a run.
 
