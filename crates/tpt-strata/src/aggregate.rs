@@ -1265,14 +1265,23 @@ impl AggregateExec {
         saw.truncate(groups * naggs);
         count.truncate(groups * naggs);
 
-        // First-seen order: each group's first row is unique, so a table over
-        // all rows, indexed by row, lists the groups in that order.
-        let mut by_row = vec![NO_GROUP; total_rows];
-        for (g, &word) in first.iter().enumerate() {
-            let (bi, row) = unpack(word);
-            by_row[offsets[bi] + row] = g;
-        }
-        let order: Vec<usize> = by_row.into_iter().filter(|&g| g != NO_GROUP).collect();
+        // First-seen order: each group's first row is unique, so the groups
+        // sorted by their packed first row (batch, then row) are in that order.
+        // With few groups, sorting them is much cheaper than a table over every
+        // input row, so the table is used only when groups are a large share.
+        let order: Vec<usize> = if first.len().saturating_mul(16) < total_rows {
+            let mut order: Vec<usize> = (0..first.len()).collect();
+            order.sort_unstable_by_key(|&g| first[g]);
+            order
+        } else {
+            // A table over all rows, indexed by row, lists the groups in order.
+            let mut by_row = vec![NO_GROUP; total_rows];
+            for (g, &word) in first.iter().enumerate() {
+                let (bi, row) = unpack(word);
+                by_row[offsets[bi] + row] = g;
+            }
+            by_row.into_iter().filter(|&g| g != NO_GROUP).collect()
+        };
         // A HAVING on a sum is decided here, so the output below is built only
         // for the groups it keeps. Execution's own HAVING pass then keeps them all.
         let order = match &self.having {

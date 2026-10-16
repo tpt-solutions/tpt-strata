@@ -1116,3 +1116,26 @@ Two follow-ups:
   pays one hash per row at load time.
 - Removing the 16-byte pointer needs an offset-buffer layout for `StrArray`. The
   decision above still applies: it is a breaking change to a public type.
+
+### Q3 profile, and first-seen order with few groups (2026-10-17)
+
+`EXPLAIN` for Q3 shows the join pushdown at work: the left side is aggregated
+first, to one row per key, and the hash join then sees 1,000 rows, not 1M. The
+join gather is not on Q3's path, so the design note's expectation that Q3 is
+limited by the gather was wrong. The profile (samply in WSL, `profile_q4 300 q3`)
+showed the cost in the dense aggregate instead. Most of it was one table over
+every input row, built only to put 1,000 groups in first-seen order.
+
+Now, with fewer than one group per 16 rows, the groups are sorted by their first
+row. The table over all rows is kept for large group counts. Q3, Windows, the
+driver's mean of 200 runs, before and after, two rounds:
+
+| variant | ms per run |
+|---|---|
+| before | 5.45, 5.24 |
+| after | 2.66, 2.81 |
+
+Full benchmark, one run per query, parallel build, after the change: Q1 2.03 ms,
+Q2 2.49 ms, Q3 2.11 ms, Q4 21.6 ms, Q5 4.44 ms. DataFusion on all cores in the
+same run: Q1 3.73, Q2 1.85, Q3 4.05, Q4 28.7, Q5 3.05 ms. Q3 and Q4 are now below
+DataFusion. Q2 and Q5 are still above it.

@@ -111,3 +111,13 @@ set above, so the layout change is not justified now.
 Decision, following the recommendation: option C. Keep `Arc<str>`. Option B
 would be the next step only if a larger string workload shows a bigger gain. The
 probe was not kept.
+
+## Correction (2026-10-17): the join is not Q3's cost
+
+The "Options" section above says the join gather limits Q3. That was wrong. The
+planner pushes Q3's aggregate below the join, so the join sees one row per
+key (1,000 rows), and the gather never runs on the 1M-row side. The Q3 profile
+pointed at the dense aggregate instead. It is now faster, after a change to
+first-seen ordering (see `benchmark-comparison.md`). Decision 4 in "Decisions
+needed" is therefore answered: the join gather does not need its own
+measurement for Q3.
