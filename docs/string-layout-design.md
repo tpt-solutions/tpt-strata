@@ -36,7 +36,7 @@ start of each row. `value(i)` returns `&str` from the buffer, with no `Arc`.
 - Per row: 8 bytes of offset, plus the bytes once. A gather copies bytes, and
   never touches a refcount.
 - Breaking: `value_ref` returns `&Arc<str>` today. It has no equivalent, and
-  `new`/`from_parts` take `Vec<Arc<str>>`. Ten call sites use `value_ref`, and
+  `new`/`from_parts` take `Vec<Arc<str>>`. Nine call sites use `value_ref`, and
   the Parquet test does too.
 - Expected effect: a scan reads offsets and bytes sequentially. Gains on Q5 are
   plausible, but unmeasured. Long strings make gathers copy more bytes.
