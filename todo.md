@@ -531,8 +531,9 @@ still holds, and every number in docs/benchmarks.md is backed by a re-run.
 - [x] 12d: columns are shared (`Arc`), so projecting copies no data. Joins read
       only the columns the query names.
 - [x] 12f: the benchmark was re-run and recorded in `docs/benchmark-comparison.md`.
-- [ ] 12f: profile the group-by with a sampling profiler. No profiler is
-      installed here.
+- [x] 12f: profile the group-by with a sampling profiler. Done for Q4 with
+      samply in WSL (docs/benchmark-comparison.md, Q4 profile). Windows
+      recording is not supported by samply's own help.
 - [ ] 12e: tpt-simd. Waits for publication.
 
 Single-thread results, 1,000,000 rows (first measurement → now): group by
@@ -658,7 +659,9 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
       a per-group state of 16 bytes or less, and output built from the workers'
       ranges. `samply` needs Administrator on Windows, so it was not used.
       Done since: a single `HAVING SUM` is decided on the accumulators before
-      the output is built (Q4 37–44 → 27–28 ms, min of 15 runs).
+      the output is built (Q4 37–44 → 27–28 ms, min of 15 runs). Counts are
+      kept only for a COUNT (Q4 27.7 → 23.8 ms, Windows). Profiled with samply
+      in WSL (docs/benchmark-comparison.md, Q4 profile).
 - [ ] tpt-simd (12e): published to crates.io, but still changing on GitHub.
       Not adopted. Revisit once its API is stable, and only if a measured
       kernel needs explicit lanes.

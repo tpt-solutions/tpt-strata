@@ -1010,3 +1010,43 @@ samply record --save-only -o q4.json.gz -- \
 there does not upload it. The useful views are the Call Tree and Flame Graph, on
 each worker thread. Look for `dense_worker`, `merge_overlapping` and
 `dense_aggregate` to match the stage breakdown above.
+
+### Q4 profile in WSL, and the sum-only path (2026-10-16)
+
+Recorded with samply in WSL Ubuntu 24.04 (`profile_q4`, 300 runs, about 27,000
+samples on the worker threads). Leaf samples, grouped by source line, with the
+code as it was before the change below:
+
+| share | where |
+|---|---|
+| 16.5% | `alloc/vec/mod.rs:1046` in `dense_worker` (a Vec operation, by line) |
+| 11.4% | `aggregate.rs:843`, the per-row key column match |
+| 8.0% | `core/intrinsics/mod.rs:457` in `dense_worker` (not identified) |
+| 8.0% and 6.5% | `aggregate.rs:842` (row loop) and `int_macros.rs:2499` (checked add) |
+| 6.2% | `alloc/vec/mod.rs:1037` in `dense_worker` (a Vec operation, by line) |
+| 8.3% | unresolved (`??`) |
+
+Most of the time is in `dense_worker`, and most of that is writing group state.
+Two changes followed:
+
+- **Column match hoisted** out of the row loop, and the group pass written as a
+  single `extend` over the segment. On Windows the difference was inside the
+  run-to-run noise (27.6–28.5 ms before, 27.2–28.2 ms after).
+- **No row counts unless a COUNT needs them.** A query with only `SUM` never
+  reads the count vector, but it was written for every group, in the workers and
+  again in the merge. `DenseGroups` now keeps counts only when a `COUNT` is
+  present. Q4 (`SUM` only), Windows, minimum of 200-run means:
+
+| variant | ms per run |
+|---|---|
+| before this change (two runs) | 27.6, 28.5 |
+| counts skipped (two runs) | 24.3, 23.3 |
+
+The full benchmark, same build, one run per query (parallel build): Q1 1.95 ms,
+Q2 2.27 ms, Q3 4.66 ms, Q4 24.3 ms, Q5 4.08 ms. DataFusion on all cores in the
+same run: Q1 3.78, Q2 1.99, Q3 4.09, Q4 28.0, Q5 2.66 ms. Q4 is now below
+DataFusion; Q2 and Q5 are still above it, and Q3 is about level.
+
+The WSL timings are not comparable with the Windows ones: the first WSL run of
+the driver took 72 ms per run, and the profiled run took 21 ms. Compare ratios
+within one environment.

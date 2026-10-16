@@ -719,15 +719,18 @@ struct DenseGroups {
     first: Vec<u64>,
     int: Vec<i64>,
     saw: Vec<bool>,
+    /// Row counts per group. Kept only when a COUNT needs them (`counts`).
     count: Vec<i64>,
+    counts: bool,
     /// Set when an integer sum leaves `i64`. The general path then reports it.
     overflow: bool,
 }
 
 impl DenseGroups {
-    fn new() -> Self {
+    fn new(counts: bool) -> Self {
         DenseGroups {
             null_group: NO_GROUP,
+            counts,
             ..Default::default()
         }
     }
@@ -739,7 +742,9 @@ impl DenseGroups {
         for _ in 0..naggs {
             self.int.push(0);
             self.saw.push(false);
-            self.count.push(0);
+            if self.counts {
+                self.count.push(0);
+            }
         }
         self.first.len() - 1
     }
@@ -817,7 +822,8 @@ fn dense_worker(
         (i128::from(hi) - i128::from(lo) + 1) as usize
     };
     let mut slot = vec![NO_GROUP; span];
-    let mut groups = DenseGroups::new();
+    let has_count = kinds.iter().any(|k| matches!(k, DenseKind::Count { .. }));
+    let mut groups = DenseGroups::new(has_count);
     // A worker creates at most one group per row and at most one per key in
     // its range. Reserving that bound up front avoids repeated regrowth of the
     // five per-group vectors when every key is a group.
@@ -827,17 +833,22 @@ fn dense_worker(
     groups.first.reserve(groups_bound);
     groups.int.reserve(groups_bound * naggs);
     groups.saw.reserve(groups_bound * naggs);
-    groups.count.reserve(groups_bound * naggs);
+    if has_count {
+        groups.count.reserve(groups_bound * naggs);
+    }
     let mut gids: Vec<usize> = Vec::with_capacity(SEGMENT_ROWS);
     for &(bi, start, end) in segs {
         let batch = &batches[bi];
         gids.clear();
-        for row in start..end {
-            let value = match &*batch.columns[key] {
-                ArrayRef::Int64(a) => a.value(row),
-                _ => None,
-            };
-            let gid = match value {
+        // The key column's type is fixed for the segment, so it is matched once,
+        // not once per row.
+        let keys = match &*batch.columns[key] {
+            ArrayRef::Int64(a) => Some(a),
+            _ => None,
+        };
+        // One group id per row, written in a single pass over the segment.
+        gids.extend(
+            (start..end).map(|row| match keys.and_then(|a| a.value(row)) {
                 Some(v) => {
                     let off = (v - lo) as usize;
                     if slot[off] == NO_GROUP {
@@ -851,9 +862,8 @@ fn dense_worker(
                     }
                     groups.null_group
                 }
-            };
-            gids.push(gid);
-        }
+            }),
+        );
         for (a, kind) in kinds.iter().enumerate() {
             match *kind {
                 DenseKind::Sum { col } => match &*batch.columns[col] {
@@ -1189,6 +1199,7 @@ impl AggregateExec {
             })
             .collect::<Option<_>>()?;
         let naggs = kinds.len();
+        let has_count = kinds.iter().any(|k| matches!(k, DenseKind::Count { .. }));
 
         // Packed first rows need the batch and the row each to fit in 32 bits.
         let mut offsets = Vec::with_capacity(batches.len());
@@ -1210,7 +1221,7 @@ impl AggregateExec {
         let mut first = vec![u64::MAX; cap];
         let mut int = vec![0i64; cap * naggs];
         let mut saw = vec![false; cap * naggs];
-        let mut count = vec![0i64; cap * naggs];
+        let mut count = vec![0i64; if has_count { cap * naggs } else { 0 }];
         let mut groups = 0;
         let mut slot = vec![NO_GROUP; range];
         let mut null_group = NO_GROUP;
@@ -1240,7 +1251,9 @@ impl AggregateExec {
                         None => overflow = true,
                     }
                     saw[dst + a] |= worker.saw[src + a];
-                    count[dst + a] += worker.count[src + a];
+                    if has_count {
+                        count[dst + a] += worker.count[src + a];
+                    }
                 }
             }
         }
