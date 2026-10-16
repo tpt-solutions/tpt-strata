@@ -1068,3 +1068,23 @@ its largest entry is a misattributed name. Thread creation (`__clone`, about
 starts a new set of threads for each aggregate or filter in a query. For a
 query that takes about 5 ms, a fixed cost of that size matters. That is the
 next thing to measure, before changing the per-row LIKE test.
+
+### Thread start-up cost (measured, not changed, 2026-10-16)
+
+Spawning and joining 20 scoped threads takes about 0.75 ms on this machine
+(Windows, 500 rounds). The parallel filter and the parallel aggregate both spawn
+a fresh set of threads for each operator, so a pool that reuses threads was the
+next candidate. Two measurements say the gain would be small:
+
+| Q5, 300 runs, Windows | ms per run |
+|---|---|
+| parallel build | 6.3, 6.3 |
+| sequential build (no `parallel` feature) | 12.7, 12.6 |
+| parallel, filter capped at 8 threads | 6.8, 6.6 |
+
+Parallelism halves Q5, so the spawn cost is worth paying. Capping the threads
+changed nothing, which means the spawn cost overlaps with work that has already
+started on the earlier threads. A pool would therefore save much less than the
+0.75 ms measured alone. A pool would also keep threads alive for the life of the
+process, and that is a design decision for the crate's maintainers, so it was not
+made here.
