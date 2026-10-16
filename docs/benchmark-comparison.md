@@ -1088,3 +1088,28 @@ started on the earlier threads. A pool would therefore save much less than the
 0.75 ms measured alone. A pool would also keep threads alive for the life of the
 process, and that is a design decision for the crate's maintainers, so it was not
 made here.
+
+### String sharing and the Q5 cost (measured, 2026-10-16)
+
+The Q5 cost is the per-row string access. Two facts:
+
+- The Parquet bridge already shares strings. `tpt-strata-parquet` reuses an
+  `Arc<str>` for a value it has already seen, from a list of up to 32 distinct
+  values. The benchmark loads its table from Parquet, so Q5 already runs on
+  shared strings.
+- The sharing that is left is limited by layout. `StrArray` stores a
+  `Vec<Arc<str>>`, a 16-byte fat pointer per row. Every test reads that pointer
+  and then the string it points to.
+
+A throwaway experiment, 1M rows, 8 regions, Q5, Windows, 60 runs each: one
+`Arc` per row gave a minimum of 6.2–6.6 ms, and one shared `Arc` per region gave
+4.5–5.5 ms. The benchmark path is the second case already.
+
+Two follow-ups:
+
+- The 32-value cap in `tpt-strata-parquet` means a column with more than 32
+  distinct values allocates again for each row whose value is not in the first
+  32. That is a cheap fix (intern with a map, bounded by the column's distinct
+  count) and was not made here.
+- Removing the 16-byte pointer needs an offset-buffer layout for `StrArray`. The
+  decision above still applies: it is a breaking change to a public type.
