@@ -1213,3 +1213,36 @@ the row count is kept. `COUNT(*) WHERE LIKE` went from 14.2 to 5.5 ms.
 
 Next target: the filter's per-row work, which is about 4 ns per row. A plain
 compare loop should be well under 1 ns per row.
+
+### Where the filter's time goes (2026-10-17)
+
+`q5_split` now also times a full scan with no filter, a sum with no filter, and
+an integer filter with and without a sum. The parallel build, median of 100
+runs, 1M rows:
+
+| query | ms |
+|---|---|
+| `COUNT(*)`, no filter | 1.76 |
+| `SUM(quantity)`, no filter | 1.73 |
+| integer filter, `COUNT(*)` | 4.05 |
+| integer filter, `SUM` | 5.76 |
+
+The sequential build, same queries: the integer filter with `COUNT(*)` takes
+7.2 ms, against 3.1 ms for the scan. So the filter itself is about 4 ns per row
+on one thread. The parallel filter costs about 2.3 ms above the scan. Split
+across 20 threads, the work would take about 0.2 ms, so about 2 ms of the
+parallel time is fixed overhead: starting and joining the threads, and joining
+their results. Starting 20 threads was measured at about 0.75 ms.
+
+Two things were tried and reverted:
+
+- Chunked row compaction (a small buffer, not a table of every row). No gain.
+  The parallel build does not use that function for filters of 256K rows or
+  more, so it was not on the path being timed.
+- A plain `COUNT(*)` with no filter takes 1.7 ms too. That cost is in the
+  aggregate, which does work per row even with no filter.
+
+Open question for the maintainers: a persistent thread pool, so a filter or an
+aggregate does not start threads per call. It could recover up to about 2 ms of
+the 4 ms in the integer filter. It needs owned, `'static` input for each job,
+and threads that live for the life of the process. Not started.

@@ -26,6 +26,9 @@ fn main() {
     ctx.add_table("facts", &facts);
     let queries = [
         ("scan only: COUNT(*)", "SELECT COUNT(*) AS n FROM facts"),
+        ("no filter: SUM(quantity)", "SELECT SUM(quantity) AS units FROM facts"),
+        ("int filter only: COUNT(*)", "SELECT COUNT(*) AS n FROM facts WHERE quantity > 50"),
+        ("int filter + SUM", "SELECT SUM(quantity) AS units FROM facts WHERE quantity > 50"),
         ("LIKE filter: COUNT(*)", "SELECT COUNT(*) AS n FROM facts WHERE region LIKE 'c%'"),
         ("LIKE filter + SUM", "SELECT SUM(quantity) AS units FROM facts WHERE region LIKE 'c%'"),
         ("int filter + COUNT and SUM", "SELECT COUNT(*) AS n, SUM(quantity) AS units FROM facts WHERE quantity > 50"),
