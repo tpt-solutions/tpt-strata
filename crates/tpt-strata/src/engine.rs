@@ -444,6 +444,163 @@ fn for_all_rows_parallel(n: usize, keep: &(impl Fn(usize) -> bool + Sync)) -> Op
     Some(parts.concat())
 }
 
+/// The rows of `n` for which `keep` holds, in order. Built by pushing, so the
+/// output is only as large as the matches. A conjunction of filters is sparse,
+/// so this is cheaper than writing every row index.
+fn sparse_rows(n: usize, keep: impl Fn(usize) -> bool + Sync) -> Vec<usize> {
+    #[cfg(feature = "parallel")]
+    if let Some(out) = sparse_rows_parallel(n, &keep) {
+        return out;
+    }
+    (0..n).filter(|&row| keep(row)).collect()
+}
+
+/// As [`sparse_rows`], on worker threads over contiguous chunks, joined in order.
+#[cfg(feature = "parallel")]
+fn sparse_rows_parallel(n: usize, keep: &(impl Fn(usize) -> bool + Sync)) -> Option<Vec<usize>> {
+    const MIN_ROWS: usize = 1 << 18;
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
+    if threads < 2 || n < MIN_ROWS {
+        return None;
+    }
+    let per = n.div_ceil(threads);
+    let parts: Vec<Vec<usize>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..n)
+            .step_by(per)
+            .map(|start| {
+                let end = (start + per).min(n);
+                scope.spawn(move || (start..end).filter(|&row| keep(row)).collect::<Vec<_>>())
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    });
+    Some(parts.concat())
+}
+
+/// One predicate's test over one batch. The typed fast path is chosen once,
+/// from the column type and the literal, so `test` does no per-row choice
+/// between them. It gives the same answer as [`Predicate::matches`].
+pub(crate) struct RowTest<'a> {
+    predicate: &'a Predicate,
+    batch: &'a Batch,
+    plan: Plan<'a>,
+}
+
+enum Plan<'a> {
+    /// A Float64 column against a Float64 literal.
+    Float(&'a F64Array, f64),
+    /// A Utf8 column against a LIKE pattern: the pattern, its kind, and whether
+    /// the test is LIKE (`true`) or NOT LIKE.
+    Like(&'a StrArray, LikeKind<'a>, &'a str, bool),
+    /// An Int64 column against an Int64 literal.
+    Int(&'a I64Array, i64),
+    /// Anything else: a typed key comparison, or the full SQL rules.
+    Key(Option<&'a ArrayRef>, Option<KeyPart<'a>>),
+}
+
+impl<'a> RowTest<'a> {
+    pub(crate) fn new(predicate: &'a Predicate, batch: &'a Batch) -> Self {
+        let op = predicate.op;
+        let column = batch.columns.get(predicate.column).map(|c| &**c);
+        let numeric = matches!(
+            op,
+            Comparison::Eq
+                | Comparison::NotEq
+                | Comparison::Gt
+                | Comparison::Gte
+                | Comparison::Lt
+                | Comparison::Lte
+        );
+        let plan = match (column, &predicate.value) {
+            (Some(ArrayRef::Float64(arr)), Scalar::F64(lit)) if numeric => Plan::Float(arr, *lit),
+            (Some(ArrayRef::Utf8(arr)), Scalar::Str(pattern))
+                if matches!(op, Comparison::Like | Comparison::NotLike) =>
+            {
+                let pattern: &str = pattern;
+                Plan::Like(arr, like_kind(pattern), pattern, op == Comparison::Like)
+            }
+            (Some(ArrayRef::Int64(arr)), Scalar::I64(lit)) if numeric => Plan::Int(arr, *lit),
+            _ => {
+                let typed = match op {
+                    Comparison::IsNull
+                    | Comparison::IsNotNull
+                    | Comparison::Like
+                    | Comparison::NotLike => None,
+                    _ => literal_key(&predicate.value),
+                };
+                Plan::Key(column, typed)
+            }
+        };
+        RowTest {
+            predicate,
+            batch,
+            plan,
+        }
+    }
+
+    /// Whether `row` passes the predicate.
+    #[inline]
+    pub(crate) fn test(&self, row: usize) -> bool {
+        match &self.plan {
+            Plan::Float(arr, lit) => {
+                let lit = *lit;
+                match arr.value(row) {
+                    Some(x) if !x.is_nan() && !lit.is_nan() => match self.predicate.op {
+                        Comparison::Eq => x == lit,
+                        Comparison::NotEq => x != lit,
+                        Comparison::Gt => x > lit,
+                        Comparison::Gte => x >= lit,
+                        Comparison::Lt => x < lit,
+                        _ => x <= lit,
+                    },
+                    _ => false,
+                }
+            }
+            Plan::Like(arr, kind, pattern, want) => match arr.value_ref(row) {
+                Some(s) => like_matches(kind, s, pattern) == *want,
+                None => false,
+            },
+            Plan::Int(arr, lit) => {
+                let lit = *lit;
+                match arr.value(row) {
+                    Some(x) => match self.predicate.op {
+                        Comparison::Eq => x == lit,
+                        Comparison::NotEq => x != lit,
+                        Comparison::Gt => x > lit,
+                        Comparison::Gte => x >= lit,
+                        Comparison::Lt => x < lit,
+                        _ => x <= lit,
+                    },
+                    None => false,
+                }
+            }
+            Plan::Key(column, typed) => {
+                if let (Some(lit), Some(col)) = (*typed, *column) {
+                    let key = key_at(col, row);
+                    // Same discriminant means same column type. A NULL key never
+                    // matches, which the fallback path also returns.
+                    if std::mem::discriminant(&key) == std::mem::discriminant(&lit) {
+                        let ord = key.cmp(&lit);
+                        return match self.predicate.op {
+                            Comparison::Eq => ord == Ordering::Equal,
+                            Comparison::NotEq => ord != Ordering::Equal,
+                            Comparison::Gt => ord == Ordering::Greater,
+                            Comparison::Gte => ord != Ordering::Less,
+                            Comparison::Lt => ord == Ordering::Less,
+                            Comparison::Lte => ord != Ordering::Greater,
+                            _ => self.predicate.matches(self.batch, row),
+                        };
+                    }
+                }
+                self.predicate.matches(self.batch, row)
+            }
+        }
+    }
+}
+
 impl Predicate {
     /// The rows of `batch` that pass, in order.
     ///
@@ -458,114 +615,8 @@ impl Predicate {
     /// `None` means every row. This lets a chain of predicates narrow one
     /// selection without copying the batch between them.
     pub fn select_from(&self, batch: &Batch, rows: Option<&[usize]>) -> Vec<usize> {
-        let column = batch.columns.get(self.column);
-
-        // A Float64 column against a Float64 literal compares the values
-        // directly. IEEE ordering already makes NaN unordered (false), and
-        // `!=` is made to agree with `compare_values`, which is also false.
-        let float_column = match column.map(|c| &**c) {
-            Some(ArrayRef::Float64(arr)) => Some(arr),
-            _ => None,
-        };
-        if let (Some(arr), Scalar::F64(lit)) = (float_column, &self.value) {
-            let op = self.op;
-            if matches!(
-                op,
-                Comparison::Eq
-                    | Comparison::NotEq
-                    | Comparison::Gt
-                    | Comparison::Gte
-                    | Comparison::Lt
-                    | Comparison::Lte
-            ) {
-                let lit = *lit;
-                return for_rows(batch.row_count(), rows, |row| match arr.value(row) {
-                    Some(x) if !x.is_nan() && !lit.is_nan() => match op {
-                        Comparison::Eq => x == lit,
-                        Comparison::NotEq => x != lit,
-                        Comparison::Gt => x > lit,
-                        Comparison::Gte => x >= lit,
-                        Comparison::Lt => x < lit,
-                        _ => x <= lit,
-                    },
-                    _ => false,
-                });
-            }
-        }
-
-        // A Utf8 column against a string pattern: match the bytes in place, with
-        // no per-row copy. A NULL never matches, as in the general path.
-        if let (Some(ArrayRef::Utf8(arr)), Scalar::Str(pattern)) =
-            (column.map(|c| &**c), &self.value)
-        {
-            if matches!(self.op, Comparison::Like | Comparison::NotLike) {
-                let want = self.op == Comparison::Like;
-                let kind = like_kind(pattern);
-                return for_rows(batch.row_count(), rows, |row| match arr.value_ref(row) {
-                    Some(s) => like_matches(&kind, s, pattern) == want,
-                    None => false,
-                });
-            }
-        }
-
-        // An Int64 column against an Int64 literal: read the values directly.
-        // A NULL never matches, as in the general path.
-        let int_column = match column.map(|c| &**c) {
-            Some(ArrayRef::Int64(arr)) => Some(arr),
-            _ => None,
-        };
-        if let (Some(arr), Scalar::I64(lit)) = (int_column, &self.value) {
-            let op = self.op;
-            if matches!(
-                op,
-                Comparison::Eq
-                    | Comparison::NotEq
-                    | Comparison::Gt
-                    | Comparison::Gte
-                    | Comparison::Lt
-                    | Comparison::Lte
-            ) {
-                let lit = *lit;
-                return for_rows(batch.row_count(), rows, |row| match arr.value(row) {
-                    Some(x) => match op {
-                        Comparison::Eq => x == lit,
-                        Comparison::NotEq => x != lit,
-                        Comparison::Gt => x > lit,
-                        Comparison::Gte => x >= lit,
-                        Comparison::Lt => x < lit,
-                        _ => x <= lit,
-                    },
-                    None => false,
-                });
-            }
-        }
-
-        let typed = match self.op {
-            Comparison::IsNull | Comparison::IsNotNull | Comparison::Like | Comparison::NotLike => {
-                None
-            }
-            _ => literal_key(&self.value),
-        };
-        for_rows(batch.row_count(), rows, |row| {
-            if let (Some(lit), Some(col)) = (typed, column) {
-                let key = key_at(col, row);
-                // Same discriminant means same column type. A NULL key never
-                // matches, which the fallback path also returns.
-                if std::mem::discriminant(&key) == std::mem::discriminant(&lit) {
-                    let ord = key.cmp(&lit);
-                    return match self.op {
-                        Comparison::Eq => ord == Ordering::Equal,
-                        Comparison::NotEq => ord != Ordering::Equal,
-                        Comparison::Gt => ord == Ordering::Greater,
-                        Comparison::Gte => ord != Ordering::Less,
-                        Comparison::Lt => ord == Ordering::Less,
-                        Comparison::Lte => ord != Ordering::Greater,
-                        _ => self.matches(batch, row),
-                    };
-                }
-            }
-            self.matches(batch, row)
-        })
+        let test = RowTest::new(self, batch);
+        for_rows(batch.row_count(), rows, |row| test.test(row))
     }
 
     /// Whether `row` passes the predicate.
@@ -643,11 +694,15 @@ impl PhysicalPlan for FilterExec {
         let keep_cols = self.keep.clone();
         Ok(Box::new(self.input.open()?.map(move |batch| {
             let batch = batch?;
-            let mut selection: Option<Vec<usize>> = None;
-            for predicate in &predicates {
-                selection = Some(predicate.select_from(&batch, selection.as_deref()));
-            }
-            let rows = selection.unwrap_or_else(|| (0..batch.row_count()).collect());
+            // Every predicate is tested on each row in one pass, so no row list
+            // is built for the first predicate and then narrowed by the second.
+            let rows = if predicates.is_empty() {
+                (0..batch.row_count()).collect()
+            } else {
+                let tests: Vec<RowTest<'_>> =
+                    predicates.iter().map(|p| RowTest::new(p, &batch)).collect();
+                sparse_rows(batch.row_count(), |row| tests.iter().all(|t| t.test(row)))
+            };
             let columns: Vec<ArrayRef> = match &keep_cols {
                 Some(cols) => cols.iter().map(|&c| batch.columns[c].take(&rows)).collect(),
                 None => batch.columns.iter().map(|c| c.take(&rows)).collect(),

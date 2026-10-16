@@ -137,6 +137,66 @@ the merge's vectors), ordering about 3 ms.
 
 Q4 is about 1.85× DataFusion on all cores. Q2 is about 2×, and Q5 about 1.7×.
 
+### Baseline on the committed code, 9b78dc3 (2026-10-14)
+
+A clean run of the committed dense path with the parallel feature. Times are
+the median of 5 after one warm-up, and every engine matches tpt-strata's result.
+
+| query | tpt-strata (parallel) | hand loop (1 thread) | DataFusion (all cores) |
+|---|---|---|---|
+| Q1 group by + 3 aggregates | 2.81 ms | 1.14 ms | 3.78 ms |
+| Q2 filter + sort + limit | 3.21 ms | 3.95 ms | 1.82 ms |
+| Q3 join + group by | 5.05 ms | 0.73 ms | 4.04 ms |
+| Q4 group by id (1M groups) | 41.6 ms | 3.16 ms | 28.5 ms |
+| Q5 LIKE filter, count and sum | 5.33 ms | 2.81 ms | 2.78 ms |
+
+Against DataFusion on all cores, Q1 is faster, Q3 is about 1.25× behind, Q4
+about 1.5×, Q2 about 1.8×, and Q5 about 1.9×. Q2 is already at the speed of a
+plain loop, so its gap is in the sort and the limit, not in the scan.
+
+### Q5: where the time goes (2026-10-14)
+
+Timed with temporary timers (removed). The aggregate's input step, the
+`LIKE` filter over 1M rows, takes about 3 ms per run. The aggregate itself
+takes about 0.6 ms. So the gap to DataFusion (about 2.3 to 2.8 ms) is in the
+scan. The string column stores a fat pointer per row, 16 bytes, so the scan
+reads about 16 MB for 1M rows. DataFusion's layout (offsets into one byte
+buffer) reads a few megabytes for the same column. Closing this gap means
+changing the string storage, which is a core format change, not a filter change.
+
+### Fused filter (2026-10-14)
+
+Each row is tested against all of a filter's predicates in one pass, instead of
+the first predicate building a row list of its matches that the second then
+narrows. Each predicate's test is chosen once per batch, so the per-row work
+is the same comparison as before. The first predicate of Q2 kept 499,672 rows
+and cost about 1.85 ms, and the second cost about 1.05 ms. The fused pass
+writes only the 2,003 final matches, and the output is built by pushing, so
+it is only as large as the matches.
+
+| query | tpt-strata (parallel) | hand loop (1 thread) | DataFusion (all cores) |
+|---|---|---|---|
+| Q1 group by + 3 aggregates | 2.31 ms | 1.06 ms | 3.44 ms |
+| Q2 filter + sort + limit | 2.24 ms | 4.07 ms | 1.74 ms |
+| Q3 join + group by | 4.89 ms | 0.82 ms | 3.82 ms |
+| Q4 group by id (1M groups) | 38.3 ms | 3.02 ms | 30.0 ms |
+| Q5 LIKE filter, count and sum | 3.92 ms | 2.03 ms | 2.78 ms |
+
+Q2 is now about 1.3× DataFusion, and Q5 about 1.4×. The Q5 filter also uses
+the push-based row list, which is faster in this run than the branch-free one
+it replaced. Q4 and Q3 are about 1.3× behind, within run-to-run noise of
+earlier runs. Results match on every query.
+
+### Q2: where the time goes (2026-10-14)
+
+Timed with temporary timers (removed). Q2's filter leaves 2,003 rows for the
+sort, and the top-100 sort of those takes about 0.05 ms. The sort is not the
+cost. Most of Q2's time is in the input step, the filter over the 1M-row table,
+at about 3 ms. Running the second predicate in parallel, like the first, did
+not change Q2 (3.58 ms in a slower run, against 3.21 to 3.36 ms before), so it
+was reverted. What remains in the filter is not yet separated: predicate
+evaluation, the row-index writes, or the copy of the kept rows.
+
 ### Partitioned merge: tried, no gain (2026-10-14)
 
 Each worker lists its groups by key bucket, and one merge thread per bucket
