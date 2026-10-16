@@ -673,10 +673,15 @@ impl FilterExec {
     /// Output only the input columns at `keep`, in that order. A column that
     /// only the predicates read is then not copied for the kept rows.
     pub fn with_keep(mut self, keep: Vec<usize>) -> Self {
-        let fields = keep
-            .iter()
-            .map(|&c| self.input.schema().fields[c].clone())
-            .collect();
+        // No column read above the filter: one placeholder column carries the
+        // row count, and it is never read.
+        let fields = if keep.is_empty() {
+            vec![Field::new("$rows", DataType::Int64, false)]
+        } else {
+            keep.iter()
+                .map(|&c| self.input.schema().fields[c].clone())
+                .collect()
+        };
         self.schema = Arc::new(Schema::new(fields));
         self.keep = Some(keep);
         self
@@ -704,6 +709,9 @@ impl PhysicalPlan for FilterExec {
                 sparse_rows(batch.row_count(), |row| tests.iter().all(|t| t.test(row)))
             };
             let columns: Vec<ArrayRef> = match &keep_cols {
+                Some(cols) if cols.is_empty() => {
+                    vec![ArrayRef::Int64(I64Array::new(vec![0; rows.len()]))]
+                }
                 Some(cols) => cols.iter().map(|&c| batch.columns[c].take(&rows)).collect(),
                 None => batch.columns.iter().map(|c| c.take(&rows)).collect(),
             };

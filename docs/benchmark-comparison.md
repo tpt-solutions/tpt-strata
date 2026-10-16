@@ -1177,3 +1177,39 @@ build:
 On this data tpt-strata is slightly ahead of DataFusion on all cores. The gap in
 the main benchmark comes from the data (its price and quantity distributions,
 and its string generator), not from the engine. Q2 needs no further engine work.
+
+### Q5 on the same data, and where its time goes (2026-10-17)
+
+`bench/compare/src/bin/q5_same_data.rs` runs Q5 on the driver's data in both
+engines, as for Q2. Median of 200 runs, Windows, parallel build:
+
+| engine | median ms |
+|---|---|
+| tpt-strata | 6.56 |
+| DataFusion, all cores | 1.62 |
+| DataFusion, 1 partition | 2.56 |
+
+Unlike Q2, this gap is real on the same data: about 4× behind on all cores. The
+main benchmark understated it.
+
+`bench/compare/src/bin/q5_split.rs` times four queries on the same table:
+
+| query | tpt-strata median ms |
+|---|---|
+| `COUNT(*)`, no filter | 1.46 |
+| `COUNT(*)` with `LIKE` filter | 14.2 before the fix below, 5.5 after |
+| `SUM` with `LIKE` filter | 6.8 |
+| integer filter, `COUNT` and `SUM` | 5.4 |
+
+The integer filter costs about the same as the `LIKE` filter, so the string
+test is not the main cost. The filter machinery is: about 4 ms of the 6 ms for
+1M rows. This is why the string layout decision stays as recorded in
+`string-layout-design.md`.
+
+Fix in this change: a `COUNT(*)` with a filter kept the scan's only column, a
+string, and copied it for every kept row, one `Arc` clone each. The filter now
+emits one placeholder `Int64` column of the kept length. It is never read, and
+the row count is kept. `COUNT(*) WHERE LIKE` went from 14.2 to 5.5 ms.
+
+Next target: the filter's per-row work, which is about 4 ns per row. A plain
+compare loop should be well under 1 ns per row.

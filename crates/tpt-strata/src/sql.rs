@@ -2300,11 +2300,9 @@ fn filter_keep(sel: &Select, scope: &Scope, schema: &Schema) -> Option<Vec<usize
     }
     cols.sort_unstable();
     cols.dedup();
-    // A query that reads no column, such as `COUNT(*)`, still needs the row
-    // count, and a batch with no columns has none. Keep the first column.
-    if cols.is_empty() && !schema.is_empty() {
-        cols.push(0);
-    }
+    // A query that reads no column, such as `COUNT(*)`, needs only the row
+    // count. An empty list makes the filter emit one placeholder column, so no
+    // input column is copied for the kept rows.
     if cols.len() == schema.len() {
         None
     } else {
