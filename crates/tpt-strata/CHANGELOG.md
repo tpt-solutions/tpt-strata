@@ -121,6 +121,12 @@ this crate follows [Semantic Versioning](https://semver.org/).
 - `ARCHITECTURE.md` notes that `Sort` and `Join` fully materialize their input
   in memory (no streaming or spill).
 
+### Fixed
+
+- SQL: `SELECT COUNT(*) ... WHERE ...` returned 0 when the query read no column
+  above its WHERE clause. The filter now keeps one column so the row count
+  survives.
+
 ## [1.0.1] - 2026-09-11
 
 ### Fixed

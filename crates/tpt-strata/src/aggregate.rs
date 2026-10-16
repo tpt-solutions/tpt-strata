@@ -1122,7 +1122,9 @@ impl AggregateExec {
             .iter()
             .map(|a| match a.func {
                 AggFunc::Sum => match input.field(a.column).map(|f| f.data_type) {
-                    Some(DataType::Int32 | DataType::Int64) => Some(DenseKind::Sum { col: a.column }),
+                    Some(DataType::Int32 | DataType::Int64) => {
+                        Some(DenseKind::Sum { col: a.column })
+                    }
                     _ => None,
                 },
                 AggFunc::Count => Some(DenseKind::Count {
@@ -1214,7 +1216,10 @@ impl AggregateExec {
                     col,
                     label: self.aggregates[a].out_name.clone(),
                     as_float: false,
-                    int: order.iter().map(|&g| i128::from(int[g * naggs + a])).collect(),
+                    int: order
+                        .iter()
+                        .map(|&g| i128::from(int[g * naggs + a]))
+                        .collect(),
                     float: Vec::new(),
                     saw: order.iter().map(|&g| saw[g * naggs + a]).collect(),
                 },

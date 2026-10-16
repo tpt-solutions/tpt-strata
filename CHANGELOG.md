@@ -39,6 +39,8 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 
 ### Fixed
 
+- SQL: `SELECT COUNT(*) ... WHERE ...` returned 0 when the query read no column
+  above its WHERE clause. Fixed in the core crate; see its changelog.
 - String and boolean range predicates (`>`, `>=`, `<`, `<=`) always returned no
   rows. They now compare in string and boolean order.
 - Joins with a shared column name resolved to the wrong side. Qualified names

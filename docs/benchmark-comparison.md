@@ -164,6 +164,30 @@ reads about 16 MB for 1M rows. DataFusion's layout (offsets into one byte
 buffer) reads a few megabytes for the same column. Closing this gap means
 changing the string storage, which is a core format change, not a filter change.
 
+### Clean run, after the filter and the COUNT(*) fix (2026-10-15)
+
+Two back-to-back runs on the release build, with the parallel feature and
+without it. Times are the median of 5 after one warm-up. Every engine returns
+the same result on every query.
+
+| query | tpt-strata (parallel) | tpt-strata (1 thread) | hand loop (1 thread) | DataFusion (all cores) |
+|---|---|---|---|---|
+| Q1 group by + 3 aggregates | 2.25 ms | 12.4 ms | 0.99 ms | 3.79 ms |
+| Q2 filter + sort + limit | 2.51 ms | 19.8 ms | 4.30 ms | 1.97 ms |
+| Q3 join + group by | 5.27 ms | 12.2 ms | 0.62 ms | 4.18 ms |
+| Q4 group by id (1M groups) | 46.8 ms | 84.2 ms | 3.36 ms | 30.9 ms |
+| Q5 LIKE filter, count and sum | 4.48 ms | 23.7 ms | 2.15 ms | 2.44 ms |
+
+Against DataFusion on all cores, the parallel build is faster on Q1 (2.25 vs
+3.79 ms). It is slower on the rest: about 1.3× on Q2 and Q3, 1.5× on Q4, and
+1.8× on Q5. The single-thread build is 3 to 10× behind DataFusion, which is
+expected: DataFusion uses 20 threads. Q4 and Q5 are the slowest against
+DataFusion, for the reasons in the sections above. The machine's speed moved between the two runs, so compare each run's
+columns with each other.
+
+A bug found while writing the new cases is fixed in the same change: a
+`SELECT COUNT(*) ... WHERE ...` failed when the filter kept no columns.
+
 ### Fused filter (2026-10-14)
 
 Each row is tested against all of a filter's predicates in one pass, instead of
