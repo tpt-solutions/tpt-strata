@@ -982,35 +982,31 @@ change).
 `tests/fast_path_cases.rs` checks every comparison operator against a plain
 pass over the data, with the groups in the same order.
 
-### How to profile Q4 with samply (Windows)
+### How to profile Q4 with samply
 
-`samply` samples the program's stacks. On Windows it needs an **elevated**
-(Administrator) PowerShell, because it uses the system's event tracing. A normal
-terminal fails with "samply requires Administrator privileges".
+`samply` samples a program's stacks. Its own help says recording is supported on
+Linux and macOS. On Windows, the installed version (0.13.1) tried to start an
+elevated helper and reported that it needs Administrator rights. So Windows
+recording is not a reliable route. Use WSL, which runs Linux.
 
-Run these in an elevated PowerShell, from the repository root:
+The Q4 driver is `crates/tpt-strata/examples/profile_q4.rs`. It runs the query
+many times, so the profiler has enough samples. Inside WSL (Ubuntu 24.04), from
+the repository, with the target directory outside the Windows checkout:
 
-```powershell
-# 1. Install once (if not already installed).
-cargo install samply
+```bash
+# One-time: install samply into the WSL Rust toolchain.
+cargo install samply --locked
 
-# 2. Build the Q4 driver with line tables, so the profile shows source lines.
-$env:CARGO_PROFILE_RELEASE_DEBUG = "line-tables-only"
-cargo build --release -p tpt-strata --features parallel --example profile_q4
+# Build the driver with line tables, so the profile shows source lines.
+CARGO_TARGET_DIR=$HOME/target-tpt CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+  cargo build --release -p tpt-strata --features parallel --example profile_q4
 
-# 3. Record: 300 timed runs (about 8 seconds). All threads are kept, since the
-#    parallel build is what is being measured.
-samply record -o q4.json.gz -- .\target\release\examples\profile_q4.exe 300
+# Record 300 timed runs. Save to a file; open it later with `samply load`.
+samply record --save-only -o q4.json.gz -- \
+  $HOME/target-tpt/release/examples/profile_q4 300
 ```
 
-`samply record` opens the Firefox Profiler in the browser when it finishes.
-To look again later, run `samply load q4.json.gz`. Loading a file in the
-profiler does not upload it. Useful flags:
-
-- `-r 2000` raises the sampling rate from the default 1000 Hz.
-- `-s` (`--save-only`) records without starting a server or opening the UI.
-- `-n` (`--no-open`) skips opening the browser.
-
-In the profiler, use the Call Tree or Flame Graph on the main thread and on the
-worker threads. Check the `dense_worker`, `merge_overlapping` and
-`dense_aggregate` frames to see where the time in the stage breakdown goes.
+`samply load q4.json.gz` opens the Firefox Profiler in a browser. Loading a file
+there does not upload it. The useful views are the Call Tree and Flame Graph, on
+each worker thread. Look for `dense_worker`, `merge_overlapping` and
+`dense_aggregate` to match the stage breakdown above.
