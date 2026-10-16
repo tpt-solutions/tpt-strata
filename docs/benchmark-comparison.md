@@ -1159,3 +1159,21 @@ runs, two rounds:
 
 No measurable gain, and the compiler was already hoisting the operator match.
 Reverted. The change is not in the tree.
+
+### Q2 on the same data in both engines (2026-10-17)
+
+The main benchmark puts Q2 behind DataFusion (2.49 ms against 1.85 ms). The
+driver's Q2 data differs from the benchmark's, so `bench/compare/src/bin/q2_same_data.rs`
+runs both engines on the driver's data: 1M rows, `id`, `region`, `quantity`
+(`i % 97`), and a deterministic `price`. Median of 200 runs, Windows, parallel
+build:
+
+| engine | median ms |
+|---|---|
+| tpt-strata | 1.84 |
+| DataFusion, all cores | 2.09 |
+| DataFusion, 1 partition | 3.47 |
+
+On this data tpt-strata is slightly ahead of DataFusion on all cores. The gap in
+the main benchmark comes from the data (its price and quantity distributions,
+and its string generator), not from the engine. Q2 needs no further engine work.
