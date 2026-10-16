@@ -195,27 +195,34 @@ impl Collector {
             }
             Collector::Str(b) => {
                 let a = arrow_downcast::<StringArray>(arr, column, "STRING")?;
-                // The distinct values are few in most columns, so a short
-                // linear scan finds a shared `Arc` faster than hashing. Past
-                // 32 distinct values the scan stops growing.
-                const SHARED_CAP: usize = 32;
+                // Equal values share one `Arc`, so a column with few distinct
+                // values touches a few hot allocations. The first 32 distinct
+                // values are kept in a short list, where a linear scan beats
+                // hashing; the rest go in a hash set, so a column with many
+                // distinct values still shares them.
+                const SMALL_CAP: usize = 32;
                 let null: std::sync::Arc<str> = std::sync::Arc::from("");
-                let mut shared: Vec<std::sync::Arc<str>> = Vec::new();
+                let mut small: Vec<std::sync::Arc<str>> = Vec::new();
+                let mut more: std::collections::HashSet<std::sync::Arc<str>> =
+                    std::collections::HashSet::new();
                 for i in 0..a.len() {
                     if a.is_null(i) {
                         b.push(false, null.clone(), &null);
                         continue;
                     }
                     let s = a.value(i);
-                    let arc = match shared.iter().find(|x| &***x == s) {
-                        Some(x) => x.clone(),
-                        None => {
-                            let x: std::sync::Arc<str> = std::sync::Arc::from(s);
-                            if shared.len() < SHARED_CAP {
-                                shared.push(x.clone());
-                            }
-                            x
+                    let arc = if let Some(x) = small.iter().find(|x| &***x == s) {
+                        x.clone()
+                    } else if let Some(x) = more.get(s) {
+                        x.clone()
+                    } else {
+                        let x: std::sync::Arc<str> = std::sync::Arc::from(s);
+                        if small.len() < SMALL_CAP {
+                            small.push(x.clone());
+                        } else {
+                            more.insert(x.clone());
                         }
+                        x
                     };
                     b.push(true, arc, &null);
                 }

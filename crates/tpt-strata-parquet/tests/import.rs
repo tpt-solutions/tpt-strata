@@ -238,3 +238,37 @@ fn reads_multiple_row_groups() {
         .iter()
         .all(|d| d == &Scalar::Str("eng".into()) || d == &Scalar::Str("sales".into())));
 }
+
+#[test]
+fn repeated_strings_share_one_allocation_past_the_first_32_values() {
+    // 200 distinct values, each repeated. Values past the first 32 must still
+    // share an `Arc` with their repeats, not get one allocation per row.
+    let dir = std::env::temp_dir().join("tpt-strata-parquet-share-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("many_strings.parquet");
+    let values: Vec<String> = (0..4000).map(|i| format!("v{}", i % 200)).collect();
+    let schema = ASchema::new(vec![AField::new("s", AType::Utf8, false)]);
+    let array = StringArray::from(values.clone());
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(array)]).unwrap();
+    write_parquet(&path, schema, vec![batch]);
+
+    let table = tpt_strata_parquet::read_parquet(&path).unwrap();
+    let mut ctx = SqlContext::new();
+    ctx.add_table("t", &table);
+    let out = ctx
+        .run("SELECT COUNT(*) AS n FROM t WHERE s = 'v150'")
+        .unwrap();
+    assert_eq!(out.batches()[0].row_count(), 1);
+    let batch = &table.batches()[0];
+    let tpt_strata::ArrayRef::Utf8(col) = &*batch.columns[0] else {
+        panic!("column is not Utf8");
+    };
+    // Row 150 and row 350 hold the same value, 'v150', which is past the first 32.
+    let (a, b) = (col.value_ref(150).unwrap(), col.value_ref(350).unwrap());
+    assert_eq!(&**a, "v150");
+    assert!(
+        Arc::ptr_eq(a, b),
+        "repeats past the first 32 values are not shared"
+    );
+    let _ = values;
+}

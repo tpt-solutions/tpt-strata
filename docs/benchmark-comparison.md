@@ -1107,9 +1107,12 @@ A throwaway experiment, 1M rows, 8 regions, Q5, Windows, 60 runs each: one
 
 Two follow-ups:
 
-- The 32-value cap in `tpt-strata-parquet` means a column with more than 32
-  distinct values allocates again for each row whose value is not in the first
-  32. That is a cheap fix (intern with a map, bounded by the column's distinct
-  count) and was not made here.
+- The 32-value cap in `tpt-strata-parquet` meant a column with more than 32
+  distinct values allocated again for each row whose value was not in the first
+  32. Fixed: values past the first 32 now go in a hash set, per batch. The test
+  `repeated_strings_share_one_allocation_past_the_first_32_values` fails on the
+  old reader and passes on the new one. The benchmark's Q5 column has 8 distinct
+  values, so its numbers do not change. A high-cardinality string column now
+  pays one hash per row at load time.
 - Removing the 16-byte pointer needs an offset-buffer layout for `StrArray`. The
   decision above still applies: it is a breaking change to a public type.
