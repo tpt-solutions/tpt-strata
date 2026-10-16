@@ -251,3 +251,29 @@ fn single_sum_having_keeps_the_same_groups_for_every_operator() {
         assert_eq!(rows(&out), want, "HAVING SUM(quantity) {op} {threshold}");
     }
 }
+
+#[test]
+fn sum_only_group_by_spanning_segments_matches_a_plain_pass() {
+    // SUM with no COUNT: the dense path keeps no row counts, so this checks the
+    // sums across segments with NULLs, with groups in first-seen order.
+    let out = run("SELECT k, SUM(quantity) AS total FROM sales GROUP BY k");
+    let mut sums = [0i64; 6];
+    let mut seen = [false; 6];
+    for i in 0..N {
+        if let Some(q) = quantity_at(i) {
+            sums[i % 6] += q;
+            seen[i % 6] = true;
+        }
+    }
+    let want: Vec<Vec<Option<Scalar>>> = (0..6)
+        .map(|k| {
+            let total = if seen[k] {
+                Some(Scalar::I64(sums[k]))
+            } else {
+                None
+            };
+            vec![Some(Scalar::I64(k as i64)), total]
+        })
+        .collect();
+    assert_eq!(rows(&out), want);
+}

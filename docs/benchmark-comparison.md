@@ -1050,3 +1050,21 @@ DataFusion; Q2 and Q5 are still above it, and Q3 is about level.
 The WSL timings are not comparable with the Windows ones: the first WSL run of
 the driver took 72 ms per run, and the profiled run took 21 ms. Compare ratios
 within one environment.
+
+### Q5 profile (2026-10-16, partial)
+
+The same driver runs Q5 (`profile_q4 300 q5`). 300 runs, WSL, about 5,200 leaf
+samples on the driver's thread, which include the setup of the 1M-row table.
+
+| share | where |
+|---|---|
+| 19% | `RowTest::test` (`engine.rs`): the per-row LIKE test |
+| 11% | `Vec` building (`from_iter`), mostly table setup |
+| 65% | `libc.so.6` |
+
+The libc share is not reliable. Symbol lookup in libc has no debug info, and
+its largest entry is a misattributed name. Thread creation (`__clone`, about
+10% of samples) is the one libc item that fits the code: the parallel build
+starts a new set of threads for each aggregate or filter in a query. For a
+query that takes about 5 ms, a fixed cost of that size matters. That is the
+next thing to measure, before changing the per-row LIKE test.
