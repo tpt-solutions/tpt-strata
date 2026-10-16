@@ -981,3 +981,36 @@ change).
 
 `tests/fast_path_cases.rs` checks every comparison operator against a plain
 pass over the data, with the groups in the same order.
+
+### How to profile Q4 with samply (Windows)
+
+`samply` samples the program's stacks. On Windows it needs an **elevated**
+(Administrator) PowerShell, because it uses the system's event tracing. A normal
+terminal fails with "samply requires Administrator privileges".
+
+Run these in an elevated PowerShell, from the repository root:
+
+```powershell
+# 1. Install once (if not already installed).
+cargo install samply
+
+# 2. Build the Q4 driver with line tables, so the profile shows source lines.
+$env:CARGO_PROFILE_RELEASE_DEBUG = "line-tables-only"
+cargo build --release -p tpt-strata --features parallel --example profile_q4
+
+# 3. Record: 300 timed runs (about 8 seconds). All threads are kept, since the
+#    parallel build is what is being measured.
+samply record -o q4.json.gz -- .\target\release\examples\profile_q4.exe 300
+```
+
+`samply record` opens the Firefox Profiler in the browser when it finishes.
+To look again later, run `samply load q4.json.gz`. Loading a file in the
+profiler does not upload it. Useful flags:
+
+- `-r 2000` raises the sampling rate from the default 1000 Hz.
+- `-s` (`--save-only`) records without starting a server or opening the UI.
+- `-n` (`--no-open`) skips opening the browser.
+
+In the profiler, use the Call Tree or Flame Graph on the main thread and on the
+worker threads. Check the `dense_worker`, `merge_overlapping` and
+`dense_aggregate` frames to see where the time in the stage breakdown goes.
