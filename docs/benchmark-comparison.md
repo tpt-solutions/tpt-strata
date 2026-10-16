@@ -926,3 +926,27 @@ and the merge does per-group work even though no key appears in two workers.
 The next change is to avoid the merge: give each worker a key range instead of a
 run of rows, so each group is built by exactly one worker, and build output
 vectors once, at their final size. Not started.
+
+### Key-range partitioning for Q4 (tried, not kept, 2026-10-16)
+
+The merge in the stage breakdown above was replaced by giving each thread a
+contiguous key range, so no group is shared and the results concatenate. Each
+thread then scans every row and keeps only its own keys. Q4, minimum of 15 runs
+in one process, parallel build:
+
+| variant | min ms | median ms |
+|---|---|---|
+| HEAD (row split + merge) | 34.8 | 37.7 |
+| key ranges, 20 threads | 40.9 | 43.5 |
+| key ranges, 8 threads | 36.4 | 38.8 |
+| key ranges, 4 threads | 33.4 | 36.5 |
+
+With 20 threads, each thread reads the key and value columns in full, so the
+input is read about 20 times. The extra memory traffic costs more than the
+merge saves. With 4 threads the gain is inside run-to-run noise. The change was
+reverted. Q3 also regressed to 11.6 ms when the same split was applied to a
+small key range, which is one reason the change was not kept.
+
+The merge is still the largest Q4 stage. Options not yet tried: a per-group
+state that is 16 bytes or less, and output vectors built directly from the
+workers' ranges.
