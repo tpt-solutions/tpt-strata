@@ -1139,3 +1139,23 @@ Full benchmark, one run per query, parallel build, after the change: Q1 2.03 ms,
 Q2 2.49 ms, Q3 2.11 ms, Q4 21.6 ms, Q5 4.44 ms. DataFusion on all cores in the
 same run: Q1 3.73, Q2 1.85, Q3 4.05, Q4 28.7, Q5 3.05 ms. Q3 and Q4 are now below
 DataFusion. Q2 and Q5 are still above it.
+
+### Q2 profile and the typed comparison (tried, not kept, 2026-10-17)
+
+Q2 is a filter, a top-100 sort and a limit. The driver's Q2 takes about 1.9 ms
+on Windows. The WSL profile, 3,000 runs, has about 5,300 leaf samples, of which
+about 55% are unresolved (libc and kernel frames). The attributable part is
+`RowTest::test` in `engine.rs`, about 19% of samples. That is the per-row
+comparison, with its plan match and its operator match.
+
+The test: integer and float comparisons with the operator fixed outside the row
+loop, so each row runs one comparison. Same NULL and NaN rules. Q2 driver, 1000
+runs, two rounds:
+
+| variant | ms per run |
+|---|---|
+| before | 1.93, 1.86 |
+| typed comparison | 1.88, 1.88 |
+
+No measurable gain, and the compiler was already hoisting the operator match.
+Reverted. The change is not in the tree.

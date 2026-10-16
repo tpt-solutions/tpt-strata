@@ -46,6 +46,26 @@ fn main() {
             ),
         ])
         .unwrap(),
+        "q2" => Table::try_new(vec![
+            Column::new("id", (0..n).map(|i| Scalar::I64(i as i64)).collect()),
+            Column::new(
+                "region",
+                (0..n)
+                    .map(|i| Scalar::Str(REGIONS[(i * 7 + i / 13) % REGIONS.len()].into()))
+                    .collect(),
+            ),
+            Column::new(
+                "quantity",
+                (0..n).map(|i| Scalar::I64((i % 97) as i64)).collect(),
+            ),
+            Column::new(
+                "price",
+                (0..n)
+                    .map(|i| Scalar::F64(((i as u64 * 2_654_435_761) % 1_000_000) as f64 / 100.0))
+                    .collect(),
+            ),
+        ])
+        .unwrap(),
         "q5" => Table::try_new(vec![
             Column::new("id", (0..n).map(|i| Scalar::I64(i as i64)).collect()),
             Column::new(
@@ -80,6 +100,11 @@ fn main() {
             "SELECT dims.label, SUM(facts.quantity) AS units FROM facts \
              JOIN dims ON facts.dim_id = dims.id GROUP BY dims.label ORDER BY label",
             20,
+        ),
+        "q2" => (
+            "SELECT id, region, price FROM facts WHERE quantity > 50 AND price < 40.0 \
+             ORDER BY price DESC LIMIT 100",
+            100,
         ),
         "q5" => (
             "SELECT COUNT(*) AS n, SUM(quantity) AS units FROM facts WHERE region LIKE 'c%'",
