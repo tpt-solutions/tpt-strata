@@ -92,3 +92,22 @@ bottleneck, because it's the only option that helps those.
 - B gives under 10% on Q5 once the per-value `LIKE` is in place. Then the layout
   is not the bottleneck, and option C is right.
 - Gathers on real high-cardinality data dominate. Then A is worth the break.
+
+## Measured (2026-10-17): decision is option C
+
+A loop-level probe, 1M rows, 8 regions, `LIKE 'c%'` style prefix test, summing
+a quantity column, Windows, 60 runs:
+
+| variant | min ms | median ms |
+|---|---|---|
+| per-row string test (shared `Arc` per row) | 0.98 | 1.14–1.28 |
+| dictionary: test each distinct value, then a `u32` key lookup per row | 0.52 | 0.59–0.67 |
+
+The probe saves about 0.5 ms per query. Q5 takes about 4.1 ms in the engine, so
+the saving is at most about 12%, and the engine's gain is likely smaller, because
+the engine's per-row work includes more than this loop. That is at the threshold
+set above, so the layout change is not justified now.
+
+Decision, following the recommendation: option C. Keep `Arc<str>`. Option B
+would be the next step only if a larger string workload shows a bigger gain. The
+probe was not kept.
