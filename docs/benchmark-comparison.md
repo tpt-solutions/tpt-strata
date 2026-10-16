@@ -904,3 +904,25 @@ needs elevation this session does not have.
 
 Q5 uses the column pruning from `filter_keep` (already in place). Its gain was
 not measured on its own.
+
+### Q4 stage breakdown (2026-10-16)
+
+The sampling profiler (`samply`) needs Administrator rights on Windows, so the
+profile was taken with temporary timers in the dense path instead. One run of
+Q4 on 1M rows, parallel build, five runs in a row (timings from the first runs
+were within 1 ms of each other):
+
+| stage | ms | share |
+|---|---|---|
+| per-worker group pass (16 segments) | 7.5 | 20% |
+| merge of worker tables into one | 13.5 | 36% |
+| first-seen order (`by_row`, `order`) | 2.7 | 7% |
+| building output state vectors | about 12 | 32% |
+| HAVING over 1M groups | 2.5 | 7% |
+
+Total about 38 ms. The merge and the output build together are about two
+thirds of the time. Both allocate and fill 1M-entry vectors several times over,
+and the merge does per-group work even though no key appears in two workers.
+The next change is to avoid the merge: give each worker a key range instead of a
+run of rows, so each group is built by exactly one worker, and build output
+vectors once, at their final size. Not started.
