@@ -653,8 +653,10 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
       (`aggregate.rs`, `dense_worker`). Parallel 56 → 41 ms, one run each. Still
       about 12× the hand loop. Stage profile (docs/benchmark-comparison.md,
       Q4 stage breakdown): the cross-worker merge is 36% and output-vector
-      building about 32%. Next: key-range partitioning so no merge is needed.
-      `samply` needs Administrator on Windows, so it was not used.
+      building about 32%. Key-range partitioning (no merge) was tried and is not
+      faster: every thread rescans the input (docs/benchmark-comparison.md). Open:
+      a per-group state of 16 bytes or less, and output built from the workers'
+      ranges. `samply` needs Administrator on Windows, so it was not used.
 - [ ] tpt-simd (12e): published to crates.io, but still changing on GitHub.
       Not adopted. Revisit once its API is stable, and only if a measured
       kernel needs explicit lanes.
