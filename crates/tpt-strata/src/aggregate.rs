@@ -774,7 +774,17 @@ fn dense_worker(
     };
     let mut slot = vec![NO_GROUP; span];
     let mut groups = DenseGroups::new();
-    let mut gids: Vec<usize> = Vec::new();
+    // A worker creates at most one group per row and at most one per key in
+    // its range. Reserving that bound up front avoids repeated regrowth of the
+    // five per-group vectors when every key is a group.
+    let rows: usize = segs.iter().map(|&(_, start, end)| end - start).sum();
+    let groups_bound = span.min(rows);
+    groups.keys.reserve(groups_bound);
+    groups.first.reserve(groups_bound);
+    groups.int.reserve(groups_bound * naggs);
+    groups.saw.reserve(groups_bound * naggs);
+    groups.count.reserve(groups_bound * naggs);
+    let mut gids: Vec<usize> = Vec::with_capacity(SEGMENT_ROWS);
     for &(bi, start, end) in segs {
         let batch = &batches[bi];
         gids.clear();

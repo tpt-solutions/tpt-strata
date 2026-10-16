@@ -886,3 +886,21 @@ The machine was still loaded, so compare ratios:
 | Q3 join, group by | 4.8× | 4.7× |
 | Q4 group by id | 16.5× | 10.4× |
 | Q5 LIKE filter | 5.7× | 5.5× |
+
+### Q4 reserve and the run after it (2026-10-16)
+
+The dense worker now reserves its group vectors up front, bounded by the rows
+it sees and its key range. Q4 creates one group per id, and before this the
+five per-group vectors regrew many times. One run each, parallel build, same
+session, so compare only the two Q4 rows:
+
+| query | tpt-strata (parallel), before | after |
+|---|---|---|
+| Q4 group by id (1M groups) | 56.3 ms | 40.6 ms |
+
+Q4 is still about 12× the hand loop. Group creation and the merge of the
+per-worker tables are the remaining cost. Not profiled: the sampling profiler
+needs elevation this session does not have.
+
+Q5 uses the column pruning from `filter_keep` (already in place). Its gain was
+not measured on its own.

@@ -646,11 +646,13 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
 - [x] LIKE: allocation-free byte matcher, and an in-place path for `Utf8`
       columns with the common pattern shapes (`engine.rs`, `like_kind`). Q5
       179 → 14 ms on 1M rows. Tests in `tests/like.rs`.
-- [ ] Q5 remaining cost: the filter copies every kept row's string column,
-      though the query never reads it. Unmeasured. Candidate: let `FilterExec`
-      take only the columns needed above it.
-- [ ] Q4 (1M groups): 4× the hand loop. Per-group hashing and output are the
-      cost; not yet profiled.
+- [x] Q5 filter copies only the columns the query reads above WHERE
+      (`sql.rs`, `filter_keep`). Already in place; its before/after time was
+      not measured separately.
+- [x] Q4 (1M groups): the dense worker reserves its group vectors up front
+      (`aggregate.rs`, `dense_worker`). Parallel 56 → 41 ms, one run each. Still
+      about 12× the hand loop. Per-group creation and the cross-worker merge
+      are the rest; the profiler re-run is still blocked on elevation.
 - [ ] tpt-simd (12e): published to crates.io, but still changing on GitHub.
       Not adopted. Revisit once its API is stable, and only if a measured
       kernel needs explicit lanes.
