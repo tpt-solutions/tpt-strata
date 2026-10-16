@@ -20,5 +20,5 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
 parquet = { workspace = true }
-arrow = { version = "55", default-features = false }
+arrow = { version = "60", default-features = false }
 bytes = "1"
