@@ -657,6 +657,8 @@ Single-thread results, 1,000,000 rows (first measurement → now): group by
       faster: every thread rescans the input (docs/benchmark-comparison.md). Open:
       a per-group state of 16 bytes or less, and output built from the workers'
       ranges. `samply` needs Administrator on Windows, so it was not used.
+      Done since: a single `HAVING SUM` is decided on the accumulators before
+      the output is built (Q4 37–44 → 27–28 ms, min of 15 runs).
 - [ ] tpt-simd (12e): published to crates.io, but still changing on GitHub.
       Not adopted. Revisit once its API is stable, and only if a measured
       kernel needs explicit lanes.

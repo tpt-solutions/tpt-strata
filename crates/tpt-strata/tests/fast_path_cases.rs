@@ -11,6 +11,9 @@ const REGIONS: [&str; 4] = ["north", "central", "coastal", "south"];
 /// A LIKE pattern and the plain test it should agree with.
 type Shape = (&'static str, fn(&str) -> bool);
 
+/// A comparison between a sum and a literal.
+type IntTest = fn(i64, i64) -> bool;
+
 fn region_at(i: usize) -> &'static str {
     REGIONS[i % 4]
 }
@@ -211,4 +214,40 @@ fn having_sum_overflow_is_reported_on_the_dense_path() {
     assert!(ctx
         .run("SELECT k FROM t GROUP BY k HAVING SUM(v) > 0")
         .is_err());
+}
+
+#[test]
+fn single_sum_having_keeps_the_same_groups_for_every_operator() {
+    // One comparison on a SUM takes the dense path, which decides HAVING on the
+    // accumulators before building the output. Each operator must keep the same
+    // groups, in the same order, as a plain pass over the data.
+    let mut sums = [0i64; 6];
+    let mut seen = [false; 6];
+    for i in 0..N {
+        let k = i % 6;
+        if let Some(q) = quantity_at(i) {
+            sums[k] += q;
+            seen[k] = true;
+        }
+    }
+    let threshold = sums[2];
+    let ops: [(&str, IntTest); 6] = [
+        ("=", |a, b| a == b),
+        ("!=", |a, b| a != b),
+        (">", |a, b| a > b),
+        (">=", |a, b| a >= b),
+        ("<", |a, b| a < b),
+        ("<=", |a, b| a <= b),
+    ];
+    for (op, test) in ops {
+        let out = run(&format!(
+            "SELECT k, SUM(quantity) AS total FROM sales GROUP BY k HAVING SUM(quantity) {op} {threshold}"
+        ));
+        let want: Vec<Vec<Option<Scalar>>> = (0..6)
+            .filter(|&k| seen[k] && test(sums[k], threshold))
+            .map(|k| vec![Some(Scalar::I64(k as i64)), Some(Scalar::I64(sums[k]))])
+            .collect();
+        assert!(!want.is_empty(), "operator {op} keeps nothing");
+        assert_eq!(rows(&out), want, "HAVING SUM(quantity) {op} {threshold}");
+    }
 }

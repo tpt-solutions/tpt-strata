@@ -576,6 +576,50 @@ impl AggregateExec {
 }
 
 impl AggregateExec {
+    /// HAVING on an integer `SUM` against an integer literal, on the dense
+    /// accumulators. `order` lists the groups in first-seen order and the result
+    /// keeps that order. `None` when the condition is another shape.
+    fn dense_having(
+        &self,
+        p: &Predicate,
+        kinds: &[DenseKind],
+        order: &[usize],
+        int: &[i64],
+        saw: &[bool],
+        naggs: usize,
+    ) -> Option<Vec<usize>> {
+        let key_count = self.group_by.len();
+        let (Scalar::I64(lit), true) = (&p.value, p.column >= key_count) else {
+            return None;
+        };
+        let a = p.column - key_count;
+        if !matches!(kinds.get(a), Some(DenseKind::Sum { .. })) {
+            return None;
+        }
+        let lit = *lit;
+        let mut keep = Vec::new();
+        for &g in order {
+            let idx = g * naggs + a;
+            if !saw[idx] {
+                continue;
+            }
+            let v = int[idx];
+            let hit = match p.op {
+                Comparison::Eq => v == lit,
+                Comparison::NotEq => v != lit,
+                Comparison::Gt => v > lit,
+                Comparison::Gte => v >= lit,
+                Comparison::Lt => v < lit,
+                Comparison::Lte => v <= lit,
+                _ => return None,
+            };
+            if hit {
+                keep.push(g);
+            }
+        }
+        Some(keep)
+    }
+
     /// HAVING on an integer `SUM` against an integer literal, decided from the
     /// accumulators directly, so no output column is built for every group.
     /// Returns `None` when the condition is another shape, or when a sum is
@@ -1216,6 +1260,14 @@ impl AggregateExec {
             by_row[offsets[bi] + row] = g;
         }
         let order: Vec<usize> = by_row.into_iter().filter(|&g| g != NO_GROUP).collect();
+        // A HAVING on a sum is decided here, so the output below is built only
+        // for the groups it keeps. Execution's own HAVING pass then keeps them all.
+        let order = match &self.having {
+            Some(Condition::Cmp(p)) => self
+                .dense_having(p, &kinds, &order, &int, &saw, naggs)
+                .unwrap_or(order),
+            _ => order,
+        };
 
         let out_first = order.iter().map(|&g| Some(unpack(first[g]))).collect();
         let states = kinds

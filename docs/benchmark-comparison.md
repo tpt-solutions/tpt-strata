@@ -958,3 +958,26 @@ and the sort can be skipped. Q4 qualifies. Minimum of 15 runs, twice, against
 HEAD: 35.6 vs 35.5 ms and 34.6 vs 34.6 ms. No measurable gain, so it was
 reverted. The stage timers had overstated that step, which is why this was
 measured end to end before keeping anything.
+
+### HAVING on a single SUM decided before the output is built (2026-10-16)
+
+`dense_aggregate` now tests a single `HAVING SUM(col) op literal` on the
+accumulators, in first-seen order, before it builds the output vectors. Only the
+groups it keeps get output. Execution's own HAVING pass then re-tests those and
+keeps them all, so results do not change. Q4's HAVING keeps no group, so its
+output build was wasted before this.
+
+Q4, minimum of 15 runs, parallel build, two rounds:
+
+| variant | min ms | median ms |
+|---|---|---|
+| HEAD | 37.2, 43.6 | 42.5, 46.1 |
+| this change | 27.3, 28.1 | 29.7, 31.1 |
+
+Full run, same change, single run per query (parallel build): Q1 2.40 ms, Q2
+2.36 ms, Q3 4.69 ms, Q4 27.1 ms, Q5 5.14 ms. Q4 is now below DataFusion's
+all-cores time (34 ms, from the earlier runs; DataFusion was not rerun for this
+change).
+
+`tests/fast_path_cases.rs` checks every comparison operator against a plain
+pass over the data, with the groups in the same order.
