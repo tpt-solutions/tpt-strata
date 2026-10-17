@@ -856,6 +856,7 @@ fn global_partial(
 }
 
 /// Combine the accumulators of two parts. Sums and counts add; `saw` is OR.
+#[cfg(feature = "parallel")]
 fn merge_acc(parts: Vec<Vec<Acc>>, naggs: usize) -> Vec<Acc> {
     let mut total = vec![Acc::default(); naggs];
     for part in parts {
