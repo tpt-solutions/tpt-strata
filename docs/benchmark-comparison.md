@@ -1413,3 +1413,23 @@ Q4 21.0, Q5 3.02. DataFusion on all cores in the same run: Q1 3.80, Q2 1.89, Q3
 Same data (`q5_same_data`): tpt-strata 4.72 ms, DataFusion on all cores 1.43 ms.
 So on the driver's data Q5 is still about 3.3× behind. The main benchmark's data
 makes the gap look smaller.
+
+### The pool's queue, and an idle-thread trap in the profile (2026-10-17)
+
+A WSL profile of Q5 showed 61% of samples in libc, mostly in futex waits. The
+pool's workers shared a receiver behind a mutex, and each held that mutex while
+blocked in `recv`, so they looked serialised. A queue with a condition variable
+was written in its place, so idle workers wait without holding a lock.
+
+Neither pool is faster. Alternating runs, 2,000 runs each:
+
+| query | Windows, old → new | WSL, old → new (three rounds) |
+|---|---|---|
+| Q5 driver | 4.51 → 4.51, 4.48; 4.47 → 4.51 ms | 3.65 → 3.84, 3.75 → 3.81, 3.64 → 3.76 ms |
+| Q2 driver | 1.15 → 1.09, 1.20 → 1.10, 1.19 → 1.13 ms | 1.16 → 1.33, 1.43 → 1.19, 1.18 → 1.18 ms |
+
+The change was reverted. The profile's libc share was idle workers waiting for
+a job, not lock contention. A sampling profile counts waiting threads as well as
+busy ones, so a pool's idle threads inflate the libc share. When reading a profile
+of this crate, look at the busy threads, or at the samples inside the crate's
+own functions.
