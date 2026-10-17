@@ -1246,3 +1246,44 @@ Open question for the maintainers: a persistent thread pool, so a filter or an
 aggregate does not start threads per call. It could recover up to about 2 ms of
 the 4 ms in the integer filter. It needs owned, `'static` input for each job,
 and threads that live for the life of the process. Not started.
+
+### A thread pool for the filter (2026-10-17)
+
+`crates/tpt-strata/src/pool.rs` is a process-wide pool built on the standard
+library only, behind the `parallel` feature. Its worker threads start once. A
+job owns its input (an `Arc<Batch>` and a copy of the predicates), so it needs
+no borrowed data and no `unsafe`. The filter's row selection uses it for
+batches of 256K rows or more. Aggregates still use scoped threads.
+
+The gate set before the change: keep the pool only if Q2 and Q5 both improve.
+Each pair below was built from the committed code and from the pool version,
+and the runs alternate, so both see the same machine state. Parallel build:
+
+| query | before, ms | with pool, ms |
+|---|---|---|
+| Q2 driver, round 1 | 1.93 | 1.14 |
+| Q2 driver, round 2 | 1.93 | 1.07 |
+| integer filter, `COUNT(*)`, round 1 | 3.41 | 2.67 |
+| integer filter, `COUNT(*)`, round 2 | 3.66 | 3.07 |
+| Q5 driver, round 1 | 6.04 | 5.59 |
+| Q5 driver, round 2 | 6.05 | 5.85 |
+
+The gate is met. Q2 is about 40% faster, and Q5 about 3–5% faster, which is
+small. Both improved in both rounds, so the pool is kept.
+
+Full benchmark, one run per query, parallel build: Q1 3.09 ms, Q2 1.58, Q3 2.10,
+Q4 25.7, Q5 4.49. DataFusion on all cores in the same run: Q1 5.13, Q2 1.87, Q3
+3.94, Q4 31.7, Q5 2.88. Q2 is now ahead of DataFusion, and Q5 is still behind.
+
+Same data, one run each, a slower machine than the previous run (DataFusion was
+also about 20% slower): Q5 7.54 ms for tpt-strata, against 1.90 ms for DataFusion
+on all cores. Q2 1.38 ms, against 2.45 ms. The Q5 ratio is unchanged, at about 4×
+behind, so the pool does not close the Q5 gap. Most of Q5's cost is elsewhere in
+the filter path.
+
+Tests: two unit tests in `pool.rs` (order of results, and a panicking job is
+re-raised while the pool keeps working). The filter tests run on tables above the
+256K-row threshold, so the pooled path is covered.
+
+The bench crate has several binaries now, so run the main benchmark with
+`cargo run --release --features parallel --bin tpt-strata-compare -- 1000000`.

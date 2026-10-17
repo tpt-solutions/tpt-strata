@@ -444,6 +444,47 @@ fn for_all_rows_parallel(n: usize, keep: &(impl Fn(usize) -> bool + Sync)) -> Op
     Some(parts.concat())
 }
 
+/// The rows of a batch that pass every predicate, in order. Large batches are
+/// split across the pool; each job owns its input, so it can outlive the call.
+#[cfg(feature = "parallel")]
+fn filter_rows(batch: &BatchRef, predicates: &Arc<Vec<Predicate>>) -> Vec<usize> {
+    const MIN_ROWS: usize = 1 << 18;
+    let n = batch.row_count();
+    let threads = crate::pool::threads();
+    if threads < 2 || n < MIN_ROWS {
+        return filter_rows_here(batch, predicates);
+    }
+    let per = n.div_ceil(threads);
+    let jobs: Vec<Box<dyn FnOnce() -> Vec<usize> + Send>> = (0..n)
+        .step_by(per)
+        .map(|start| {
+            let end = (start + per).min(n);
+            let batch = Arc::clone(batch);
+            let predicates = Arc::clone(predicates);
+            Box::new(move || {
+                let tests: Vec<RowTest<'_>> =
+                    predicates.iter().map(|p| RowTest::new(p, &batch)).collect();
+                (start..end)
+                    .filter(|&row| tests.iter().all(|t| t.test(row)))
+                    .collect()
+            }) as Box<dyn FnOnce() -> Vec<usize> + Send>
+        })
+        .collect();
+    crate::pool::run(jobs).concat()
+}
+
+/// The rows of a batch that pass every predicate, on the calling thread.
+#[cfg(not(feature = "parallel"))]
+fn filter_rows(batch: &BatchRef, predicates: &Arc<Vec<Predicate>>) -> Vec<usize> {
+    filter_rows_here(batch, predicates)
+}
+
+/// The rows of a batch that pass every predicate, on the calling thread.
+fn filter_rows_here(batch: &BatchRef, predicates: &Arc<Vec<Predicate>>) -> Vec<usize> {
+    let tests: Vec<RowTest<'_>> = predicates.iter().map(|p| RowTest::new(p, batch)).collect();
+    sparse_rows(batch.row_count(), |row| tests.iter().all(|t| t.test(row)))
+}
+
 /// The rows of `n` for which `keep` holds, in order. Built by pushing, so the
 /// output is only as large as the matches. A conjunction of filters is sparse,
 /// so this is cheaper than writing every row index.
@@ -697,6 +738,7 @@ impl PhysicalPlan for FilterExec {
         let predicates = self.predicates.clone();
         let schema = self.schema.clone();
         let keep_cols = self.keep.clone();
+        let predicates = Arc::new(predicates);
         Ok(Box::new(self.input.open()?.map(move |batch| {
             let batch = batch?;
             // Every predicate is tested on each row in one pass, so no row list
@@ -704,9 +746,7 @@ impl PhysicalPlan for FilterExec {
             let rows = if predicates.is_empty() {
                 (0..batch.row_count()).collect()
             } else {
-                let tests: Vec<RowTest<'_>> =
-                    predicates.iter().map(|p| RowTest::new(p, &batch)).collect();
-                sparse_rows(batch.row_count(), |row| tests.iter().all(|t| t.test(row)))
+                filter_rows(&batch, &predicates)
             };
             let columns: Vec<ArrayRef> = match &keep_cols {
                 Some(cols) if cols.is_empty() => {

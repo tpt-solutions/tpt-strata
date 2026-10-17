@@ -33,6 +33,8 @@ pub mod error;
 pub mod format;
 pub mod json;
 pub mod key;
+#[cfg(feature = "parallel")]
+mod pool;
 pub mod query;
 pub mod schema;
 pub mod sql;
