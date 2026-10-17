@@ -121,3 +121,18 @@ pointed at the dense aggregate instead. It is now faster, after a change to
 first-seen ordering (see `benchmark-comparison.md`). Decision 4 in "Decisions
 needed" is therefore answered: the join gather does not need its own
 measurement for Q3.
+
+## Gate result (2026-10-18): not built
+
+The gate set for the prototype: keep option B only if Q5 on the driver's data
+improves by at least 25%.
+
+The best case is estimated from the probe above. The per-row string test plus
+sum took 0.98 ms with plain strings and 0.52 ms with dictionary keys, a saving of
+about 0.46 ms. Q5 takes about 3.8–4.2 ms on the same data, so the best case is
+about 11–12%. That is below the gate.
+
+The prototype was not built, because its best case fails the gate. Option C
+stands for now. The remaining Q5 cost on the driver's data is spread across the
+filter's per-row test and its iteration, and neither the layout nor the pool has
+been the main cost in measurement.
