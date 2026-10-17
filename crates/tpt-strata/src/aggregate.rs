@@ -21,7 +21,7 @@ use crate::types::Scalar;
 
 /// Whether a data type is orderable for `MIN`/`MAX` (and `ORDER BY`).
 ///
-/// Every native v1 type is orderable, so this is a no-op guard today. It
+/// Every native type is orderable, so this is a no-op guard today. It
 /// exists so a future non-orderable `DataType` fails at plan-build time with a
 /// named diagnostic instead of at runtime.
 fn is_orderable(dt: DataType) -> bool {

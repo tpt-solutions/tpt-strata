@@ -108,7 +108,7 @@ Examples of what callers see (wording pinned by tests):
 ```
 No column named 'nonexistent'. Available columns: service, region, latency_ms
 Type mismatch in 'latency_ms': expected f64, found str. Cannot compare 'latency_ms' (f64) with a literal of str type
-SQL error: 'OR in WHERE' is not supported in tpt-strata v1.1 (deliberate scope decision); combine predicates with AND only. See docs/v1.1-scope.md at line 1, column 37
+SQL error: 'OR in WHERE' is not supported in tpt-strata (deliberate scope decision); combine predicates with AND only. See docs/scope.md at line 1, column 37
 ```
 
 Parse errors also carry the line, the offending text, and a caret.

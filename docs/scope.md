@@ -1,10 +1,10 @@
-# tpt-strata — v1.1 Scope Decisions
+# tpt-strata — Scope Decisions
 
 **Date:** 2026-09-12
 **Source:** Phase 10 review findings (todo.md §Phase 10)
 
-This file records the *deliberate* scope decisions from the post-1.0.1 review.
-Each item below is a decision, not a bug: tpt-strata's v1.1 subset is
+This file records the *deliberate* scope decisions from the review before the first release.
+Each item below is a decision, not a bug: tpt-strata's SQL subset is
 deliberately small, and everything outside it either (a) gets a **targeted
 diagnostic** pointing here, or (b) is communicated here for a documented
 reason. The go/no-go for each "maybe" item is demand-gated by its named
@@ -87,7 +87,7 @@ reasoning is kept as written, and the list below records what changed.
 | Column-to-column comparisons | Implemented (types must match, or both be numeric) |
 | `RIGHT` / `FULL` joins | Implemented (equi-joins; unmatched rows of the other side are NULL-padded) |
 | `NOT`, `NOT IN`, `NOT BETWEEN` | Implemented. `NOT` is pushed down to the comparisons, which keeps SQL's NULL rules |
-| `CAST`, `COUNT(DISTINCT ...)`, arithmetic in `SELECT` | Still deferred. Kept out of v1.1: no consumer query uses them yet. Rejected with `unsupported cast` or a targeted message |
+| `CAST`, `COUNT(DISTINCT ...)`, arithmetic in `SELECT` | Still deferred. Kept out for now: no consumer query uses them yet. Rejected with `unsupported cast` or a targeted message |
 | Native `Date` / `Timestamp` types | Implemented (2026-10-13). DATE literals, string coercion, grouping, joins, MIN/MAX, and the Parquet bridge. CSV and JSON do not infer dates |
 | Native `Decimal`, `Binary`, unsigned and narrow integers, `Float32` | Still deferred. These are widened or rejected at import |
 - 2026-10-13 (unreleased): `OR` with parentheses, `IN`, `LEFT` joins, several

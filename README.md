@@ -90,7 +90,7 @@ let result = ctx.run(
 
 Keywords are case-insensitive; column names are case-sensitive. A rejected
 construct gets a message that names it and points at
-[docs/v1.1-scope.md](docs/v1.1-scope.md). The
+[docs/scope.md](docs/scope.md). The
 [FAQ](docs/faq.md) explains the reasons.
 
 ## Reading Parquet files
@@ -185,7 +185,7 @@ Results are the same with or without the feature. The
   what to change
 - [ARCHITECTURE.md](ARCHITECTURE.md) — crate boundaries, the format/engine
   split, and the bridge-isolation rule
-- [docs/v1.1-scope.md](docs/v1.1-scope.md) — deliberate v1.1 scope decisions
+- [docs/scope.md](docs/scope.md) — deliberate scope decisions
   (SQL features, data types, forward-looking ideas)
 - [docs/integration-recipe.md](docs/integration-recipe.md) — a template for
   wiring tpt-strata into a struct-backed store

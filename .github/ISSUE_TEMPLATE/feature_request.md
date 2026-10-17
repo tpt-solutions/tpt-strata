@@ -14,7 +14,7 @@ labels: enhancement
 
 ## Scope check
 
-- [ ] I checked [docs/v1.1-scope.md](../../docs/v1.1-scope.md). This may be a deliberate deferral, and it may need a consumer query to justify it.
+- [ ] I checked [docs/scope.md](../../docs/scope.md). This may be a deliberate deferral, and it may need a consumer query to justify it.
 - [ ] This keeps the core crate free of external dependencies (Parquet and Arrow stay in the bridge crate).
 
 ## Alternatives you considered

@@ -10,7 +10,7 @@ from `cargo run -p tpt-strata --example diagnostics`.
 | `missing-column` | `MissingColumn` | A name in the query or builder call is not in the table. |
 | `type-mismatch` | `TypeMismatch` | A value or aggregate does not fit the column's type. |
 | `unsupported` | `UnsupportedOperation` | The operation is valid SQL but not in this engine, or it breaks a rule such as duplicate output names. |
-| `sql` | `Sql` | The SQL text does not parse, or uses a construct outside the v1.1 subset. |
+| `sql` | `Sql` | The SQL text does not parse, or uses a construct outside the supported subset. |
 | `io` | `Io` | Reading or writing a file failed. The underlying error is the `source()`. |
 | `import` | `Import` | A file was read but its contents could not be turned into a table. |
 
@@ -50,7 +50,7 @@ self-join, which is not supported yet.
 ## `sql`
 
 ```text
-SQL error: unsupported cast: tpt-strata v1 has no CAST support; provide values in the target type directly at line 1, column 13
+SQL error: unsupported cast: tpt-strata has no CAST support; provide values in the target type directly at line 1, column 13
   SELECT CAST(salary AS TEXT) FROM employees
               ^
 ```
@@ -60,10 +60,10 @@ two cases:
 
 - **A syntax error**, such as `WHERE name =` with nothing after it. Fix the
   SQL text.
-- **A construct outside the v1.1 subset**, such as `CAST`, `COUNT(DISTINCT ...)`,
+- **A construct outside the supported subset**, such as `CAST`, `COUNT(DISTINCT ...)`,
   subqueries, or arithmetic in `SELECT`. The message names the construct and
   says what to do instead. The subset and the reasons for each gap are in
-  [v1.1-scope.md](v1.1-scope.md).
+  [scope.md](scope.md).
 
 ## `io`
 

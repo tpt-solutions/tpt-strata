@@ -1,4 +1,4 @@
-//! A minimal, hand-written SQL surface for the v1 subset.
+//! A minimal, hand-written SQL surface for the supported subset.
 //!
 //! Keeping the parser in this crate preserves the zero-external-dependency
 //! promise for the core engine. Supported grammar:
@@ -26,7 +26,7 @@
 //! unknown rows are filtered out either way, as in SQL.
 //!
 //! Anything outside this subset (e.g. `CAST`, arithmetic, subqueries) is
-//! rejected with a targeted diagnostic pointing at `docs/v1.1-scope.md`. The
+//! rejected with a targeted diagnostic pointing at `docs/scope.md`. The
 //! omissions are decisions, not accidents.
 //!
 //! Supported aggregate functions: `SUM`, `COUNT`, `MIN`, `MAX`, `AVG`,
@@ -198,8 +198,8 @@ enum Tok {
     On,
     And,
     As,
-    // Keywords lexed so the deliberate v1.1 scope gaps get targeted
-    // diagnostics instead of generic parse errors (see docs/v1.1-scope.md).
+    // Keywords lexed so the deliberate scope gaps get targeted
+    // diagnostics instead of generic parse errors (see docs/scope.md).
     Or,
     In,
     Between,
@@ -641,14 +641,14 @@ impl Parser {
         }
     }
 
-    /// Reject a v1.1-scope SQL construct with a clear, deliberate diagnostic.
+    /// Reject an out-of-scope SQL construct with a clear, deliberate diagnostic.
     ///
-    /// These are *decided* omissions (see `docs/v1.1-scope.md`), spelled out
+    /// These are *decided* omissions (see `docs/scope.md`), spelled out
     /// instead of a generic parse error, so callers know the gap is
     /// intentional and how to express the query in the supported subset.
     fn unsupported_v1_1(&self, what: &str, hint: &str) -> QueryError {
         self.perr(format!(
-            "'{what}' is not supported in tpt-strata v1.1 (deliberate scope decision); {hint}. See docs/v1.1-scope.md"
+            "'{what}' is not supported in tpt-strata (deliberate scope decision); {hint}. See docs/scope.md"
         ))
     }
 
@@ -695,7 +695,7 @@ impl Parser {
         self.expect(Tok::LParen)?;
         if name.eq_ignore_ascii_case("CAST") {
             return Err(self.perr(
-                "unsupported cast: tpt-strata v1 has no CAST support; provide values in the target type directly",
+                "unsupported cast: tpt-strata has no CAST support; provide values in the target type directly",
             ));
         }
         if *self.peek() == Tok::Distinct {

@@ -50,7 +50,7 @@ large trait hierarchy to implement.
 
 ```toml
 [dependencies]
-tpt-strata = "1.0"
+tpt-strata = "0.1"
 ```
 
 The crate has no external dependencies. Check with `cargo tree -p tpt-strata`.
@@ -215,15 +215,15 @@ pred := col op literal | col op col
 ### Constructs outside the subset
 
 These are rejected on purpose, each with a targeted message that names the
-construct and points at [`docs/v1.1-scope.md`](https://github.com/tpt-solutions/tpt-strata/blob/master/docs/v1.1-scope.md):
+construct and points at [`docs/scope.md`](https://github.com/tpt-solutions/tpt-strata/blob/master/docs/scope.md):
 
 - `CAST`, `COUNT(DISTINCT ...)`, and arithmetic or functions other than the
   aggregates
 
-Each one is easy to express in the supported subset. The v1.1 scope document
+Each one is easy to express in the supported subset. The scope document
 records the reasoning and the rewrite for each.
 
-Each one is easy to express in the supported subset. The v1.1 scope document
+Each one is easy to express in the supported subset. The scope document
 records the reasoning and the rewrite for each.
 
 ## Joins
@@ -309,7 +309,7 @@ Rust **1.75**. CI checks this with a pinned toolchain.
   depends on Arrow or Parquet.
 - [`ARCHITECTURE.md`](https://github.com/tpt-solutions/tpt-strata/blob/master/ARCHITECTURE.md):
   crate boundaries and the bridge-isolation rule.
-- [`docs/v1.1-scope.md`](https://github.com/tpt-solutions/tpt-strata/blob/master/docs/v1.1-scope.md):
+- [`docs/scope.md`](https://github.com/tpt-solutions/tpt-strata/blob/master/docs/scope.md):
   deliberate scope decisions for deferred SQL features and types.
 - [`docs/integration-recipe.md`](https://github.com/tpt-solutions/tpt-strata/blob/master/docs/integration-recipe.md):
   wiring tpt-strata into a struct-backed store.

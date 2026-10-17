@@ -58,7 +58,7 @@ Tests:
 3. Execute it: add an operator in `engine.rs`, or reuse one. Give the operator
    an `explain` line so `SqlContext::explain` shows it.
 4. Test it: a positive test in `regressions.rs`, a test for the rejected
-   variants in `diagnostics.rs`, and update `docs/v1.1-scope.md` and the README
+   variants in `diagnostics.rs`, and update `docs/scope.md` and the README
    grammar.
 
 ## Adding a data type

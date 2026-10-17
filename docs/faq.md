@@ -45,7 +45,7 @@ number.
 `IS [NOT] NULL`, `[NOT] LIKE`. `GROUP BY`, `HAVING`, `DISTINCT`,
 `ORDER BY` (several keys, aliases allowed), `LIMIT`, `OFFSET`. Comments with
 `--` and `/* */`. Full list and the rejected constructs:
-[v1.1 scope](v1.1-scope.md).
+[scope decisions](scope.md).
 
 ## What SQL is not supported?
 

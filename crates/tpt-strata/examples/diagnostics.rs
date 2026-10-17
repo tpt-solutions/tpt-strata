@@ -43,11 +43,11 @@ fn main() {
         .run("SELECT department FROM employees WHERE salary = 'abc'")
         .unwrap_err();
     print_case("sql: type mismatch", &err);
-    // CAST is still outside the v1.1 subset, so it gets a targeted message.
+    // CAST is still outside the supported subset, so it gets a targeted message.
     let err = ctx
         .run("SELECT CAST(salary AS TEXT) FROM employees")
         .unwrap_err();
-    print_case("sql: deliberate v1.1 scope gap", &err);
+    print_case("sql: deliberate scope gap", &err);
 }
 
 fn print_case(label: &str, err: &QueryError) {

@@ -74,7 +74,7 @@ fn snapshot_unsupported_cast_sql() {
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "SQL error: unsupported cast: tpt-strata v1 has no CAST support; provide values in the target type directly at line 1, column 13\n  SELECT CAST(salary AS STRING) FROM employees\n              ^"
+        "SQL error: unsupported cast: tpt-strata has no CAST support; provide values in the target type directly at line 1, column 13\n  SELECT CAST(salary AS STRING) FROM employees\n              ^"
     );
 }
 
@@ -133,9 +133,9 @@ fn snapshot_group_by_validation() {
     );
 }
 
-// === Deliberate v1.1 scope gaps (targeted diagnostics) ===
+// === Deliberate scope gaps (targeted diagnostics) ===
 //
-// These features are *decided* omissions (docs/v1.1-scope.md), so each is
+// These features are *decided* omissions (docs/scope.md), so each is
 // rejected with a message naming the construct and pointing at the decision,
 // rather than a generic parse error. The wording prefix is pinned below.
 
@@ -182,7 +182,7 @@ fn comparing_a_text_column_with_a_number_column_names_both() {
 
 #[test]
 fn is_null_between_and_like_in_where_are_supported() {
-    // Shipped in the v1.1 subset: these must run, not be rejected.
+    // Shipped in the supported subset: these must run, not be rejected.
     let c = ctx();
     let nulls = c
         .run("SELECT * FROM employees WHERE department IS NOT NULL")

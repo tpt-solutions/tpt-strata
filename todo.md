@@ -221,7 +221,7 @@ the benchmark numbers.
 ### Missing SQL features (scope as a deliberate v1.1 decision, not bugs)
 
 Status: the items below were first *decided* as v1.1 scope (recorded in
-`docs/v1.1-scope.md`). Checkboxes now reflect whether the feature is
+`docs/scope.md`). Checkboxes now reflect whether the feature is
 **implemented** (`[x]`) or still **deferred** (`[ ]`, rejected with a targeted
 parser diagnostic). See Phase 13 for the implementation log.
 
@@ -237,7 +237,7 @@ parser diagnostic). See Phase 13 for the implementation log.
 ### Missing data types
 
 Decision: **evaluated and deferred pending consumer confirmation**, recorded
-in `docs/v1.1-scope.md`. Adding a type touches the whole native format
+in `docs/scope.md`. Adding a type touches the whole native format
 (`Scalar`, `DataType`, arrays, engine comparisons, `format.rs`, bridge), so
 each must be bought by a real consumer schema.
 
@@ -255,7 +255,7 @@ each must be bought by a real consumer schema.
 
 ### Innovative / forward-looking (optional, gauge consumer demand first)
 
-Decision: **demand-gated**, recorded in `docs/v1.1-scope.md` with the named
+Decision: **demand-gated**, recorded in `docs/scope.md` with the named
 consumer gate for each.
 
 - [x] `Table::from_rows`-style row-oriented convenience constructor
@@ -272,7 +272,7 @@ made deliberately rather than by omission.
 ## Phase 11 — Recommendations (SQL coverage & comparison rigor)
 
 > Source: review of spec.txt §3/§6, validation-memo.md, docs/benchmarks.md,
-> and docs/v1.1-scope.md, 2026-10-13. These reopen some Phase 10 "deferred"
+> and docs/scope.md, 2026-10-13. These reopen some Phase 10 "deferred"
 > decisions. The Phase 10 checkboxes stay as recorded; each item below
 > supersedes its deferral once done.
 
@@ -292,8 +292,8 @@ made deliberately rather than by omission.
       Either add a DataFusion (and ideally Polars) run on the same workloads,
       or reword the item to say it is not done.
 - [x] Reconcile CAST (decision: stays deferred, recorded as a row in
-      `docs/v1.1-scope.md`; the memo's "add at the SQL layer" note is superseded): `validation-memo.md` says "add at the SQL layer," but
-      `docs/v1.1-scope.md` does not list CAST. Add a row with a decision, or
+      `docs/scope.md`; the memo's "add at the SQL layer" note is superseded): `validation-memo.md` says "add at the SQL layer," but
+      `docs/scope.md` does not list CAST. Add a row with a decision, or
       correct the memo.
 - [ ] Revisit the spec §3 thesis in writing: state the ergonomic win over
       DataFusion using the consumer query list, not the five-row sample.
@@ -327,14 +327,14 @@ Start with the parser change, since the cheap predicates fit into it.
 ### 11c. Types
 
 - [x] Date/Timestamp: done (see Phase 15). The blast-radius list was the work plan:
-      (per v1.1-scope.md). Write the blast-radius list (Scalar, DataType,
+      (per docs/scope.md). Write the blast-radius list (Scalar, DataType,
       arrays, comparisons, format.rs inference, Parquet bridge) before
       estimating.
 
 ### 11d. Documentation and guardrails
 
 
-- [x] Update `docs/v1.1-scope.md` with a changelog entry for each item moved
+- [x] Update `docs/scope.md` with a changelog entry for each item moved
       out of "deferred."
 - [x] Update the README "Constructs outside the subset" section as each
       construct lands; keep the diagnostic tests in
@@ -463,10 +463,12 @@ still holds, and every number in docs/benchmarks.md is backed by a re-run.
 - [x] CODEOWNERS team name: DROPPED (decision, 2026-10-13, per owner). Not pursued.
 - [x] MSRV checked per crate (Phase 14): core and serde build and test on 1.75.
       Parquet, CLI and WASM build on 1.85, and the whole workspace needs 1.85.
-      CI runs both checks.
+      CI runs both checks. Since the Arrow 60 update (2026-10-18), Parquet, CLI
+      and Python need 1.88, WASM stays on 1.85, and the workspace check runs on 1.88.
 - [x] Exact version pins (`=1.0.1`): DECIDED, keep them. Revisit only when the publish
       order is settled.
-- [ ] No tags, crates.io entries, or docs.rs builds exist yet.
+- [ ] No tags, crates.io entries, or docs.rs builds exist yet. The first
+      release is 0.1.0; it is tracked in RELEASE-0.1.0.md.
 
 ### Phase C — adoption and features (partly done)
 

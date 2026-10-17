@@ -142,4 +142,4 @@ Kinds: `missing-column`, `type-mismatch`, `unsupported`, `sql`, `io`, `import`.
 
 - [Cookbook](cookbook.md): recipes for the common questions
 - [FAQ](faq.md): what it is for, what it is not for, and what is not supported yet
-- [v1.1 scope](v1.1-scope.md): which SQL features are deliberately deferred
+- [scope decisions](scope.md): which SQL features are deliberately deferred

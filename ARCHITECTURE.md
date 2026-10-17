@@ -71,7 +71,7 @@ Dependency direction: the upper modules are layers over the lower ones.
 - `SortExec` and `JoinExec` **fully materialize their inputs in memory** —
   neither operator streams or spills to disk. Consumers should assume a
   `ORDER BY`/`JOIN` costs working memory proportional to the input, not a
-  bounded pipe. (This commitment is recorded in `docs/v1.1-scope.md`; any
+  bounded pipe. (This commitment is recorded in `docs/scope.md`; any
   future streaming/spill mode is a spec change, not a silent default.)
 - `AggregateExec` accumulates group state in a `HashMap` keyed by the group
   key scalars; global aggregates (no `GROUP BY`) emit a single row even over
@@ -103,7 +103,7 @@ SQL query and the equivalent builder chain return identical tables.
   Constructs outside the subset (`OR`, `IS NULL`, `IN`, `BETWEEN`, `LIKE`,
   `DISTINCT`, `HAVING`, parentheses, `LEFT`/`OUTER` joins, multiple joins,
   column-to-column comparisons) are rejected with targeted diagnostics; the
-  decisions behind those gaps live in `docs/v1.1-scope.md`.
+  decisions behind those gaps live in `docs/scope.md`.
 
 ## The bridge-isolation rule in practice
 
