@@ -1319,3 +1319,39 @@ the ratios within one run, not the absolute times.
 
 Q5 is still about 1.5× behind DataFusion in the full run and about 4× behind on
 the same data. The pool does not change that.
+
+### Where Q5's time goes after the filter (2026-10-17)
+
+`q5_split`, parallel build, median of 100 runs, on the current code:
+
+| query | ms | what it adds |
+|---|---|---|
+| `COUNT(*)`, no filter | 1.79 | scan and aggregate base |
+| integer filter, `COUNT(*)` | 2.36 | filter: +0.6 |
+| integer filter, `SUM` | 3.78 | summing the kept rows: +1.4 |
+| `LIKE` filter, `COUNT(*)` | 3.64 | `LIKE` over the integer filter: +1.3 |
+| `LIKE` filter, `SUM` (Q5) | 4.97 | |
+
+The filter itself is now cheap. The cost after it is larger. The kept rows are
+materialised three times over: the row indices, the concatenation of the parallel
+results, and the gathered values of the summed column. Each is a fresh buffer of
+about 1 MB.
+
+A microbenchmark on this machine: a fresh 1 MB vector, filled and freed, costs
+about 0.30 ms. Refilling a reused one costs about 0.14 ms. So each fresh buffer
+adds about 0.16 ms. Three per query accounts for most of the 1.4 ms. The LIKE
+test costs about 1.3 ms over the integer test, which is the per-row string access.
+
+Options, with rough estimates for Q5 (about 5 ms):
+
+- Row indices as `u32`, not `usize`. This halves the index buffers, about 0.3 ms.
+  `ArrayRef::take` is a public method that takes `&[usize]`, so this is a public
+  API change, or it needs a second internal gather.
+- Let an aggregate read the source batch through the row indices. This removes
+  the gathered copy, about 0.5 ms, but changes the plan shape.
+- The dictionary layout from `string-layout-design.md`. This would replace most
+  of the 1.3 ms LIKE cost. The earlier probe estimated a smaller saving, because it
+  kept the per-row key work.
+
+The biggest single item is the materialisation, not the arithmetic. None of the
+options is started.
