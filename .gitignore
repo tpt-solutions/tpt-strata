@@ -17,3 +17,4 @@ bench/compare/Cargo.lock
 # Python build output
 crates/tpt-strata-python/dist/
 crates/tpt-strata-python/target/
+__pycache__/
