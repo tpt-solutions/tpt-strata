@@ -1381,3 +1381,35 @@ Full benchmark, one run per query, parallel build: Q1 2.45 ms, Q2 1.61, Q3 1.46,
 Q4 22.2, Q5 2.75. DataFusion on all cores in the same run: Q1 3.77, Q2 1.85, Q3
 3.91, Q4 28.2, Q5 2.46. Q5 is now close to DataFusion, at 1.1×, where it was
 1.5× in the previous run. Q1 through Q4 are ahead.
+
+### Global aggregates without a filter (2026-10-17)
+
+The row-based global aggregate now covers every global integer `SUM` and `COUNT`,
+not only those over a filter. An unfiltered input is read as ranges of 64K rows,
+split across the pool. Each part accumulates its sums and counts, and the parts
+merge. The path is the same one that reads a filter's rows, so the two cases share
+code.
+
+The unfiltered sum was slower at first, because the first version ran on one
+thread. Splitting it across the pool fixed that.
+
+Alternating runs, 2,000 runs each, the committed code against the change:
+
+| query | round 1 | round 2 | round 3 |
+|---|---|---|---|
+| `SUM` over 1M rows, no filter | 0.90 → 0.30 ms | 0.93 → 0.32 | 0.96 → 0.32 |
+| Q5 driver | 4.14 → 3.98 ms | 4.45 → 4.40 | 4.20 → 4.23 |
+
+The unfiltered sum is about 3× faster. Q5 barely changed, so this step does not
+close Q5's gap. The gain is for every global sum and count without a filter.
+
+A new test, `global_sum_and_count_without_a_filter_match_a_plain_pass`, covers a
+table large enough for the parallel split, with NULLs.
+
+Full benchmark, one run per query, parallel build: Q1 1.71 ms, Q2 1.63, Q3 1.58,
+Q4 21.0, Q5 3.02. DataFusion on all cores in the same run: Q1 3.80, Q2 1.89, Q3
+3.77, Q4 29.4, Q5 2.80. Q5 is close to DataFusion here.
+
+Same data (`q5_same_data`): tpt-strata 4.72 ms, DataFusion on all cores 1.43 ms.
+So on the driver's data Q5 is still about 3.3× behind. The main benchmark's data
+makes the gap look smaller.

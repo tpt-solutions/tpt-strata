@@ -310,3 +310,26 @@ fn global_sum_over_an_empty_filter_is_null_and_count_is_zero() {
         run("SELECT SUM(quantity) AS total, COUNT(*) AS rows FROM sales WHERE quantity > 1000");
     assert_eq!(rows(&out), vec![vec![None, Some(Scalar::I64(0))]]);
 }
+
+#[test]
+fn global_sum_and_count_without_a_filter_match_a_plain_pass() {
+    // No filter: the aggregate reads whole batches, split into pieces across the
+    // pool. The table is large enough for the parallel split, and NULLs are skipped.
+    let out =
+        run("SELECT SUM(quantity) AS total, COUNT(quantity) AS n, COUNT(*) AS rows FROM sales");
+    let (mut total, mut n) = (0i64, 0i64);
+    for i in 0..N {
+        if let Some(q) = quantity_at(i) {
+            total += q;
+            n += 1;
+        }
+    }
+    assert_eq!(
+        rows(&out),
+        vec![vec![
+            Some(Scalar::I64(total)),
+            Some(Scalar::I64(n)),
+            Some(Scalar::I64(N as i64)),
+        ]]
+    );
+}

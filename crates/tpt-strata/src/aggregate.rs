@@ -767,6 +767,148 @@ fn pack(batch: usize, row: usize) -> u64 {
 fn unpack(word: u64) -> (usize, usize) {
     ((word >> 32) as usize, (word & 0xFFFF_FFFF) as usize)
 }
+/// The rows of one piece of a batch that a global aggregate reads: a range, or
+/// the listed rows in order.
+enum Rows {
+    Range(usize, usize),
+    Listed(Vec<usize>),
+}
+
+impl Rows {
+    fn len(&self) -> usize {
+        match self {
+            Rows::Range(start, end) => end - start,
+            Rows::Listed(rows) => rows.len(),
+        }
+    }
+
+    fn for_each(&self, mut f: impl FnMut(usize)) {
+        match self {
+            Rows::Range(start, end) => (*start..*end).for_each(&mut f),
+            Rows::Listed(rows) => rows.iter().for_each(|&row| f(row)),
+        }
+    }
+
+    /// The rows split into pieces of at most `SEGMENT_ROWS`, in order.
+    fn pieces(self) -> Vec<Rows> {
+        match self {
+            Rows::Range(start, end) => (start..end)
+                .step_by(SEGMENT_ROWS)
+                .map(|s| Rows::Range(s, (s + SEGMENT_ROWS).min(end)))
+                .collect(),
+            Rows::Listed(rows) if rows.len() <= SEGMENT_ROWS => vec![Rows::Listed(rows)],
+            Rows::Listed(rows) => rows
+                .chunks(SEGMENT_ROWS)
+                .map(|chunk| Rows::Listed(chunk.to_vec()))
+                .collect(),
+        }
+    }
+}
+
+/// What a global aggregate accumulates for one aggregate.
+#[derive(Clone, Copy, Default)]
+struct Acc {
+    sum: i128,
+    saw: bool,
+    count: i64,
+}
+
+/// Accumulate the global aggregates over some pieces, on this thread.
+fn global_partial(
+    aggregates: &[Aggregate],
+    pieces: &[(BatchRef, Rows)],
+    columns: Option<&[usize]>,
+) -> Vec<Acc> {
+    let source = |c: usize| columns.map_or(c, |map| map[c]);
+    let mut acc = vec![Acc::default(); aggregates.len()];
+    for (batch, rows) in pieces {
+        for (agg, a) in aggregates.iter().zip(acc.iter_mut()) {
+            match agg.func {
+                AggFunc::Sum => match &*batch.columns[source(agg.column)] {
+                    ArrayRef::Int32(c) => rows.for_each(|row| {
+                        if let Some(v) = c.value(row) {
+                            a.sum += i128::from(v);
+                            a.saw = true;
+                        }
+                    }),
+                    ArrayRef::Int64(c) => rows.for_each(|row| {
+                        if let Some(v) = c.value(row) {
+                            a.sum += i128::from(v);
+                            a.saw = true;
+                        }
+                    }),
+                    _ => {}
+                },
+                AggFunc::Count if agg.count_star => a.count += rows.len() as i64,
+                AggFunc::Count => {
+                    let column = &batch.columns[source(agg.column)];
+                    rows.for_each(|row| {
+                        if !column.is_null(row) {
+                            a.count += 1;
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    acc
+}
+
+/// Combine the accumulators of two parts. Sums and counts add; `saw` is OR.
+fn merge_acc(parts: Vec<Vec<Acc>>, naggs: usize) -> Vec<Acc> {
+    let mut total = vec![Acc::default(); naggs];
+    for part in parts {
+        for (t, p) in total.iter_mut().zip(part) {
+            t.sum += p.sum;
+            t.saw |= p.saw;
+            t.count += p.count;
+        }
+    }
+    total
+}
+
+/// Accumulate the global aggregates over the pieces, on the pool when there is
+/// enough work to share, and on this thread otherwise.
+#[cfg(feature = "parallel")]
+fn global_accumulate(
+    aggregates: &[Aggregate],
+    pieces: Vec<(BatchRef, Rows)>,
+    columns: Option<&[usize]>,
+) -> Vec<Acc> {
+    const MIN_ROWS: usize = 1 << 18;
+    let total: usize = pieces.iter().map(|(_, rows)| rows.len()).sum();
+    let threads = crate::pool::threads().min(pieces.len());
+    if threads < 2 || total < MIN_ROWS {
+        return global_partial(aggregates, &pieces, columns);
+    }
+    let per = pieces.len().div_ceil(threads);
+    let mut groups: Vec<Vec<(BatchRef, Rows)>> = Vec::new();
+    let mut rest = pieces.into_iter().peekable();
+    while rest.peek().is_some() {
+        groups.push(rest.by_ref().take(per).collect());
+    }
+    let columns = columns.map(<[usize]>::to_vec);
+    let jobs: Vec<Box<dyn FnOnce() -> Vec<Acc> + Send>> = groups
+        .into_iter()
+        .map(|group| {
+            let aggregates = aggregates.to_vec();
+            let columns = columns.clone();
+            Box::new(move || global_partial(&aggregates, &group, columns.as_deref()))
+                as Box<dyn FnOnce() -> Vec<Acc> + Send>
+        })
+        .collect();
+    merge_acc(crate::pool::run(jobs), aggregates.len())
+}
+
+#[cfg(not(feature = "parallel"))]
+fn global_accumulate(
+    aggregates: &[Aggregate],
+    pieces: Vec<(BatchRef, Rows)>,
+    columns: Option<&[usize]>,
+) -> Vec<Acc> {
+    global_partial(aggregates, &pieces, columns)
+}
 
 /// The aggregates a dense single-key pass can compute: integer sums and counts.
 #[derive(Clone, Copy)]
@@ -1004,53 +1146,42 @@ impl AggregateExec {
         })
     }
 
-    /// A global aggregate over the rows of a filter. Each state reads its column
-    /// through the filter's column map, and only the passing rows.
-    fn global_over_selection(
+    /// A global aggregate over the given rows of the batches. Each aggregate reads
+    /// its column, through the filter's column map when there is one.
+    fn global_over_rows(
         &self,
-        selection: &crate::engine::Selection,
+        batches: &[BatchRef],
+        rows: Vec<Rows>,
+        columns: Option<&[usize]>,
     ) -> Result<Vec<BatchRef>, QueryError> {
+        let pieces: Vec<(BatchRef, Rows)> = batches
+            .iter()
+            .zip(rows)
+            .flat_map(|(batch, rows)| {
+                rows.pieces()
+                    .into_iter()
+                    .map(move |piece| (Arc::clone(batch), piece))
+            })
+            .collect();
+        let acc = global_accumulate(&self.aggregates, pieces, columns);
         let mut states = self.new_states();
-        for state in &mut states {
+        for ((state, agg), acc) in states.iter_mut().zip(&self.aggregates).zip(acc) {
             state.push_group();
-        }
-        let source = |c: usize| selection.columns.as_ref().map_or(c, |map| map[c]);
-        for (batch, rows) in selection.batches.iter().zip(&selection.rows) {
-            for (agg, state) in self.aggregates.iter().zip(states.iter_mut()) {
-                match state {
-                    AggState::Sum { int, saw, .. } => match &*batch.columns[source(agg.column)] {
-                        ArrayRef::Int32(c) => {
-                            for &row in rows {
-                                if let Some(v) = c.value(row) {
-                                    int[0] += i128::from(v);
-                                    saw[0] = true;
-                                }
-                            }
-                        }
-                        ArrayRef::Int64(c) => {
-                            for &row in rows {
-                                if let Some(v) = c.value(row) {
-                                    int[0] += i128::from(v);
-                                    saw[0] = true;
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    AggState::Count { n, count_star, .. } => {
-                        if *count_star {
-                            n[0] += rows.len() as i64;
-                        } else {
-                            let column = &batch.columns[source(agg.column)];
-                            n[0] += rows.iter().filter(|&&row| !column.is_null(row)).count() as i64;
-                        }
-                    }
-                    _ => {}
+            match state {
+                AggState::Sum { int, saw, .. } => {
+                    int[0] = acc.sum;
+                    saw[0] = acc.saw;
                 }
+                AggState::Count { n, .. } => n[0] = acc.count,
+                _ => debug_assert!(
+                    false,
+                    "global_selectable admits only SUM and COUNT: {}",
+                    agg.out_name
+                ),
             }
         }
         // One group, with no key, so its first row is absent, as in the general path.
-        self.output(vec![None], states, &selection.batches)
+        self.output(vec![None], states, batches)
     }
 
     /// The output batch for the groups in `first`, after HAVING: group keys,
@@ -1534,9 +1665,23 @@ impl PhysicalPlan for AggregateExec {
         // so the filter's kept rows are never copied. The check comes first, so
         // the input is not run twice when the shape does not qualify.
         if self.group_by.is_empty() && self.global_selectable() {
-            if let Some(selection) = self.input.selection()? {
-                return self.global_over_selection(&selection);
-            }
+            let (batches, rows, columns): (Vec<BatchRef>, Vec<Rows>, Option<Vec<usize>>) =
+                match self.input.selection()? {
+                    Some(selection) => (
+                        selection.batches,
+                        selection.rows.into_iter().map(Rows::Listed).collect(),
+                        selection.columns,
+                    ),
+                    None => {
+                        let batches = self.input.execute()?;
+                        let rows = batches
+                            .iter()
+                            .map(|b| Rows::Range(0, b.row_count()))
+                            .collect();
+                        (batches, rows, None)
+                    }
+                };
+            return self.global_over_rows(&batches, rows, columns.as_deref());
         }
         let batches = self.input.execute()?;
         let segs = segments(&batches);
