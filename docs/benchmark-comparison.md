@@ -1287,3 +1287,35 @@ re-raised while the pool keeps working). The filter tests run on tables above th
 
 The bench crate has several binaries now, so run the main benchmark with
 `cargo run --release --features parallel --bin tpt-strata-compare -- 1000000`.
+
+### The aggregate on the pool (2026-10-17)
+
+Every aggregate used to start its own scoped threads. A profile of an unfiltered
+`SUM(quantity)` over 1M rows showed most of its samples in thread creation. The
+aggregate's parallel paths now run their segments as jobs on the same pool as the
+filter. `AggregateExec` is cloned into an `Arc` for the jobs, and each job owns
+its batches and segments.
+
+Each pair is the committed code and the pooled aggregate, built with the same
+driver, alternating runs, parallel build, mean of 2,000 runs:
+
+| query | round 1 before, after | round 2 before, after | round 3 before, after |
+|---|---|---|---|
+| `SUM` over 1M rows, no filter | 1.40, 1.20 ms | 1.37, 1.02 ms | 1.47, 1.03 ms |
+| Q5 driver | 6.46, 6.49 ms | 7.04, 7.28 ms | 6.39, 6.12 ms |
+| Q4 driver (1,000 runs, four rounds) | 27.4, 22.5; 21.6, 22.0; 22.5, 22.3; 22.6, 25.1 ms | | |
+
+The unfiltered sum is about 25% faster in all three rounds. Q5 and Q4 show no
+change beyond noise. The profile's attribution to thread creation was right in
+kind, but the time it saved is smaller than the profile suggested. The
+threads still run in parallel with the work that is already going.
+
+Full benchmark, one run per query, after this change, parallel build: Q1 1.73
+ms, Q2 1.57, Q3 2.01, Q4 29.3, Q5 3.43. DataFusion on all cores in the same run:
+Q1 4.04, Q2 2.03, Q3 4.29, Q4 29.6, Q5 2.22. Q1, Q2 and Q3 are ahead of
+DataFusion, Q4 is about even, and Q5 is still behind. Q4 ran at 21.6 ms in the
+previous full run, so run-to-run variation on this machine is about 30%. Compare
+the ratios within one run, not the absolute times.
+
+Q5 is still about 1.5× behind DataFusion in the full run and about 4× behind on
+the same data. The pool does not change that.

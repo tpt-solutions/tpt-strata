@@ -460,6 +460,7 @@ impl AggState {
     }
 }
 
+#[derive(Clone)]
 pub struct AggregateExec {
     input: Arc<dyn PhysicalPlan>,
     group_by: Vec<usize>,
@@ -901,21 +902,23 @@ fn dense_workers(
 ) -> Vec<DenseGroups> {
     #[cfg(feature = "parallel")]
     {
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .min(segs.len());
+        let threads = crate::pool::threads().min(segs.len());
         if threads > 1 {
+            // Jobs own their input, so the batches and kinds are cloned.
             let per = segs.len().div_ceil(threads);
-            return std::thread::scope(|scope| {
-                let workers: Vec<_> = segs
-                    .chunks(per)
-                    .map(|chunk| scope.spawn(move || dense_worker(batches, chunk, key, kinds)))
-                    .collect();
-                workers
-                    .into_iter()
-                    .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-                    .collect()
-            });
+            let batches: Vec<BatchRef> = batches.to_vec();
+            let kinds: Vec<DenseKind> = kinds.to_vec();
+            let jobs: Vec<Box<dyn FnOnce() -> DenseGroups + Send>> = segs
+                .chunks(per)
+                .map(|chunk| {
+                    let batches = batches.clone();
+                    let kinds = kinds.clone();
+                    let chunk = chunk.to_vec();
+                    Box::new(move || dense_worker(&batches, &chunk, key, &kinds))
+                        as Box<dyn FnOnce() -> DenseGroups + Send>
+                })
+                .collect();
+            return crate::pool::run(jobs);
         }
     }
     vec![dense_worker(batches, segs, key, kinds)]
@@ -1148,21 +1151,23 @@ impl AggregateExec {
     ) -> Vec<Partial> {
         #[cfg(feature = "parallel")]
         {
-            let threads = std::thread::available_parallelism()
-                .map_or(1, |n| n.get())
-                .min(segs.len());
+            let threads = crate::pool::threads().min(segs.len());
             if threads > 1 {
+                // Jobs own their input, so the plan and the batches are cloned.
                 let per = segs.len().div_ceil(threads);
-                return std::thread::scope(|scope| {
-                    let workers: Vec<_> = segs
-                        .chunks(per)
-                        .map(|chunk| scope.spawn(move || self.run_segments(batches, chunk, dense)))
-                        .collect();
-                    workers
-                        .into_iter()
-                        .map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-                        .collect()
-                });
+                let plan = Arc::new(self.clone());
+                let batches: Vec<BatchRef> = batches.to_vec();
+                let jobs: Vec<Box<dyn FnOnce() -> Partial + Send>> = segs
+                    .chunks(per)
+                    .map(|chunk| {
+                        let plan = Arc::clone(&plan);
+                        let batches = batches.clone();
+                        let chunk = chunk.to_vec();
+                        Box::new(move || plan.run_segments(&batches, &chunk, dense))
+                            as Box<dyn FnOnce() -> Partial + Send>
+                    })
+                    .collect();
+                return crate::pool::run(jobs);
             }
         }
         vec![self.run_segments(batches, segs, dense)]

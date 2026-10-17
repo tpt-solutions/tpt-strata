@@ -66,7 +66,7 @@ fn main() {
             ),
         ])
         .unwrap(),
-        "q5" => Table::try_new(vec![
+        "q5" | "sumf" | "sumall" => Table::try_new(vec![
             Column::new("id", (0..n).map(|i| Scalar::I64(i as i64)).collect()),
             Column::new(
                 "quantity",
@@ -105,6 +105,11 @@ fn main() {
             "SELECT id, region, price FROM facts WHERE quantity > 50 AND price < 40.0 \
              ORDER BY price DESC LIMIT 100",
             100,
+        ),
+        "sumall" => ("SELECT SUM(quantity) AS units FROM facts", 1),
+        "sumf" => (
+            "SELECT SUM(quantity) AS units FROM facts WHERE quantity > 50",
+            1,
         ),
         "q5" => (
             "SELECT COUNT(*) AS n, SUM(quantity) AS units FROM facts WHERE region LIKE 'c%'",
