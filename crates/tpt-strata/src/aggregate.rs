@@ -990,6 +990,98 @@ struct Partial {
 }
 
 impl AggregateExec {
+    /// Whether every aggregate is an integer `SUM` or a `COUNT`, so a global
+    /// aggregate can run over selected rows without copying them.
+    fn global_selectable(&self) -> bool {
+        let input = self.input.schema();
+        self.aggregates.iter().all(|a| match a.func {
+            AggFunc::Count => true,
+            AggFunc::Sum => matches!(
+                input.field(a.column).map(|f| f.data_type),
+                Some(DataType::Int32 | DataType::Int64)
+            ),
+            _ => false,
+        })
+    }
+
+    /// A global aggregate over the rows of a filter. Each state reads its column
+    /// through the filter's column map, and only the passing rows.
+    fn global_over_selection(
+        &self,
+        selection: &crate::engine::Selection,
+    ) -> Result<Vec<BatchRef>, QueryError> {
+        let mut states = self.new_states();
+        for state in &mut states {
+            state.push_group();
+        }
+        let source = |c: usize| selection.columns.as_ref().map_or(c, |map| map[c]);
+        for (batch, rows) in selection.batches.iter().zip(&selection.rows) {
+            for (agg, state) in self.aggregates.iter().zip(states.iter_mut()) {
+                match state {
+                    AggState::Sum { int, saw, .. } => match &*batch.columns[source(agg.column)] {
+                        ArrayRef::Int32(c) => {
+                            for &row in rows {
+                                if let Some(v) = c.value(row) {
+                                    int[0] += i128::from(v);
+                                    saw[0] = true;
+                                }
+                            }
+                        }
+                        ArrayRef::Int64(c) => {
+                            for &row in rows {
+                                if let Some(v) = c.value(row) {
+                                    int[0] += i128::from(v);
+                                    saw[0] = true;
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    AggState::Count { n, count_star, .. } => {
+                        if *count_star {
+                            n[0] += rows.len() as i64;
+                        } else {
+                            let column = &batch.columns[source(agg.column)];
+                            n[0] += rows.iter().filter(|&&row| !column.is_null(row)).count() as i64;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // One group, with no key, so its first row is absent, as in the general path.
+        self.output(vec![None], states, &selection.batches)
+    }
+
+    /// The output batch for the groups in `first`, after HAVING: group keys,
+    /// then one column per aggregate.
+    fn output(
+        &self,
+        first: Vec<Option<(usize, usize)>>,
+        states: Vec<AggState>,
+        batches: &[BatchRef],
+    ) -> Result<Vec<BatchRef>, QueryError> {
+        // The groups to output, in order: all of them, or those HAVING keeps.
+        let keep: Vec<usize> = match &self.having {
+            Some(condition) => self.kept_groups(condition, &first, &states, batches)?,
+            None => (0..first.len()).collect(),
+        };
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.len());
+        for (gi, &c) in self.group_by.iter().enumerate() {
+            let dt = self.schema.fields[gi].data_type;
+            columns.push(gather_opt(batches, c, keep.iter().map(|&g| first[g]), dt));
+        }
+        for (i, state) in states.iter().enumerate() {
+            let dt = self.schema.fields[self.group_by.len() + i].data_type;
+            columns.push(state.finish(dt, batches, &keep)?);
+        }
+
+        Ok(vec![Arc::new(Batch::new_unchecked(
+            self.schema.clone(),
+            columns,
+        ))])
+    }
+
     fn new_states(&self) -> Vec<AggState> {
         let input = self.input.schema();
         self.aggregates
@@ -1438,6 +1530,14 @@ impl PhysicalPlan for AggregateExec {
     }
 
     fn execute(&self) -> Result<Vec<BatchRef>, QueryError> {
+        // A global SUM or COUNT over a filter reads the selected rows directly,
+        // so the filter's kept rows are never copied. The check comes first, so
+        // the input is not run twice when the shape does not qualify.
+        if self.group_by.is_empty() && self.global_selectable() {
+            if let Some(selection) = self.input.selection()? {
+                return self.global_over_selection(&selection);
+            }
+        }
         let batches = self.input.execute()?;
         let segs = segments(&batches);
         let dense = match self.group_by.as_slice() {
@@ -1461,25 +1561,7 @@ impl PhysicalPlan for AggregateExec {
             }
         };
 
-        // The groups to output, in order: all of them, or those HAVING keeps.
-        let keep: Vec<usize> = match &self.having {
-            Some(condition) => self.kept_groups(condition, &first, &states, &batches)?,
-            None => (0..first.len()).collect(),
-        };
-        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.len());
-        for (gi, &c) in self.group_by.iter().enumerate() {
-            let dt = self.schema.fields[gi].data_type;
-            columns.push(gather_opt(&batches, c, keep.iter().map(|&g| first[g]), dt));
-        }
-        for (i, state) in states.iter().enumerate() {
-            let dt = self.schema.fields[self.group_by.len() + i].data_type;
-            columns.push(state.finish(dt, &batches, &keep)?);
-        }
-
-        Ok(vec![Arc::new(Batch::new_unchecked(
-            self.schema.clone(),
-            columns,
-        ))])
+        self.output(first, states, &batches)
     }
 
     fn explain(&self, depth: usize, out: &mut String) {

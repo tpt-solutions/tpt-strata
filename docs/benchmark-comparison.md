@@ -1355,3 +1355,29 @@ Options, with rough estimates for Q5 (about 5 ms):
 
 The biggest single item is the materialisation, not the arithmetic. None of the
 options is started.
+
+### A global aggregate reads the filter's rows directly (2026-10-17)
+
+The filter's kept rows used to be copied into new columns, and the aggregate
+then read the copy. Now a global `SUM` over integers or a `COUNT` over a filter
+reads the passing rows from the source batch (`engine.rs`, `Selection` and
+`PhysicalPlan::selection`; `aggregate.rs`, `global_over_selection`). The filter
+copies nothing. Grouped aggregates and every other shape keep the old path. The
+check runs before the input, so the input is never run twice.
+
+Alternating runs, parallel build, 2,000 runs each, committed code against the
+change:
+
+| query | round 1, before → after | round 2 | round 3 |
+|---|---|---|---|
+| Q5 driver | 5.54 → 4.63 ms | 5.50 → 4.34 | 5.58 → 4.36 |
+| integer filter, `SUM` | 4.61 → 3.02 ms | 4.32 → 2.99 | 4.23 → 2.99 |
+
+Tests: two new tests in `fast_path_cases.rs` check a global `SUM` and `COUNT` over
+a filter, with NULLs and with a dropped column (so the column map is used), and
+a global `SUM` over an empty filter, which is NULL, with `COUNT` of zero.
+
+Full benchmark, one run per query, parallel build: Q1 2.45 ms, Q2 1.61, Q3 1.46,
+Q4 22.2, Q5 2.75. DataFusion on all cores in the same run: Q1 3.77, Q2 1.85, Q3
+3.91, Q4 28.2, Q5 2.46. Q5 is now close to DataFusion, at 1.1×, where it was
+1.5× in the previous run. Q1 through Q4 are ahead.

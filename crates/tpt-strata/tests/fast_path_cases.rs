@@ -277,3 +277,36 @@ fn sum_only_group_by_spanning_segments_matches_a_plain_pass() {
         .collect();
     assert_eq!(rows(&out), want);
 }
+
+#[test]
+fn global_sum_and_count_over_a_filter_match_a_plain_pass() {
+    // The aggregate reads the filter's selected rows directly. The sum reads a
+    // column the filter keeps, which is not the first input column, so the
+    // column map is exercised, and NULLs must be skipped.
+    let out = run("SELECT SUM(quantity) AS total, COUNT(quantity) AS n, COUNT(*) AS rows FROM sales WHERE region = 'south' AND quantity > 20");
+    let (mut total, mut n, mut passing) = (0i64, 0i64, 0i64);
+    for i in 0..N {
+        if region_at(i) == "south" && quantity_at(i).is_some_and(|q| q > 20) {
+            passing += 1;
+            if let Some(q) = quantity_at(i) {
+                total += q;
+                n += 1;
+            }
+        }
+    }
+    assert_eq!(
+        rows(&out),
+        vec![vec![
+            Some(Scalar::I64(total)),
+            Some(Scalar::I64(n)),
+            Some(Scalar::I64(passing)),
+        ]]
+    );
+}
+
+#[test]
+fn global_sum_over_an_empty_filter_is_null_and_count_is_zero() {
+    let out =
+        run("SELECT SUM(quantity) AS total, COUNT(*) AS rows FROM sales WHERE quantity > 1000");
+    assert_eq!(rows(&out), vec![vec![None, Some(Scalar::I64(0))]]);
+}

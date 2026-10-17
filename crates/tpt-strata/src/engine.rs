@@ -44,11 +44,29 @@ pub trait PhysicalPlan: Send + Sync {
         let batches = self.execute()?;
         Ok(Box::new(batches.into_iter().map(Ok)))
     }
+    /// For a filter: its input batches with the rows that pass, without copying
+    /// them. An aggregate can then read the selected rows directly. `None` for
+    /// every other operator.
+    fn selection(&self) -> Result<Option<Selection>, QueryError> {
+        Ok(None)
+    }
+
     /// Write this operator and its inputs as an indented tree, one operator
     /// per line, root first.
     fn explain(&self, depth: usize, out: &mut String) {
         push_line(out, depth, "Operator");
     }
+}
+
+/// The batches under a filter, and the rows of each that pass it.
+pub struct Selection {
+    /// The input batches, in order. Their columns are the filter's input.
+    pub batches: Vec<BatchRef>,
+    /// The passing rows of each batch, in order.
+    pub rows: Vec<Vec<usize>>,
+    /// The input column behind each output column of the filter, when the
+    /// filter drops columns. `None` means the output columns are the input's.
+    pub columns: Option<Vec<usize>>,
 }
 
 pub(crate) fn push_line(out: &mut String, depth: usize, text: &str) {
@@ -732,6 +750,27 @@ impl FilterExec {
 impl PhysicalPlan for FilterExec {
     fn schema(&self) -> &Schema {
         &self.schema
+    }
+
+    fn selection(&self) -> Result<Option<Selection>, QueryError> {
+        let predicates = Arc::new(self.predicates.clone());
+        let mut batches = Vec::new();
+        let mut rows = Vec::new();
+        for batch in self.input.open()? {
+            let batch = batch?;
+            let passing = if predicates.is_empty() {
+                (0..batch.row_count()).collect()
+            } else {
+                filter_rows(&batch, &predicates)
+            };
+            batches.push(batch);
+            rows.push(passing);
+        }
+        Ok(Some(Selection {
+            batches,
+            rows,
+            columns: self.keep.clone(),
+        }))
     }
 
     fn open(&self) -> Result<BatchStream, QueryError> {
