@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # arrow and parquet are released together and must move together;
+      # updating one alone gives two Arrow versions that do not build.
+      arrow-parquet:
+        patterns: ["arrow", "arrow-*", "parquet"]
       minor-and-patch:
         update-types: [minor, patch]
   - package-ecosystem: github-actions

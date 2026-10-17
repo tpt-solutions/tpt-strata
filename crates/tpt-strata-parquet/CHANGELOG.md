@@ -14,6 +14,8 @@ this crate follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Minimum Rust version is 1.88** (was 1.85). Arrow and Parquet are updated
+  from 55 to 60, which need it. Gzip pages use the pure-Rust `zlib-rs` backend.
 - **Behavior change:** supported types are wider. `INT8`, `INT16`, `UINT8`,
   `UINT16`, `UINT32`, `FLOAT`, `LARGE_STRING`, `STRING_VIEW`, `DATE32` and
   `TIMESTAMP` are imported (widened to `i32`, `i64`, `f64` or `str`). Dates and

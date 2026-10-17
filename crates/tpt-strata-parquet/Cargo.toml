@@ -3,7 +3,7 @@ name = "tpt-strata-parquet"
 description = "Parquet import bridge for tpt-strata"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.85"
+rust-version = "1.88"
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -20,5 +20,5 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
 parquet = { workspace = true }
-arrow = { version = "55", default-features = false }
+arrow = { version = "60", default-features = false }
 bytes = "1"

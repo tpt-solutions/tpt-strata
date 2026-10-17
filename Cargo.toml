@@ -15,4 +15,4 @@ repository = "https://github.com/tpt-solutions/tpt-strata"
 homepage = "https://github.com/tpt-solutions/tpt-strata"
 
 [workspace.dependencies]
-parquet = { version = "55", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "flate2"] }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "flate2", "flate2-zlib-rs"] }

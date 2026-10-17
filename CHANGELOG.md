@@ -20,8 +20,12 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 - **Behavior change:** `-0.0` and `0.0` sort as equal. They used to sort with
   `-0.0` first. `NaN` still sorts last.
 - Per-crate minimum Rust versions are recorded in each `Cargo.toml`. The core
-  and serde crates are verified on 1.75. The Parquet, CLI and WASM crates are
-  verified on 1.85. The workspace as a whole needs 1.85.
+  and serde crates are verified on 1.75. The WASM crate needs 1.85. The
+  Parquet, CLI and Python crates need 1.88, because Arrow and Parquet 60 do.
+  The workspace as a whole needs 1.88.
+- The `cargo-deny` config works with current cargo-deny (the removed
+  `unlicensed` key is gone) and allows `CC0-1.0`, which Arrow's `tiny-keccak`
+  build dependency uses. Dependabot updates Arrow and Parquet together.
 - **Behavior change:** `AS` aliases now name output columns. They were parsed
   and ignored before, so `SUM(x) AS total` came back as `SUM(x)`.
 - **Behavior change:** `SUM` over an integer column returns `Int64` (it was
