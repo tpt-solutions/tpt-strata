@@ -44,6 +44,20 @@ crate stays dependency-free in every case. See [docs/bindings.md](docs/bindings.
 New here? Start with the [quickstart](docs/quickstart.md) and the
 [cookbook](docs/cookbook.md).
 
+## Installation
+
+```toml
+[dependencies]
+tpt-strata = "0.1"
+tpt-strata-parquet = "0.1"   # only if you read or write Parquet
+```
+
+The core crate has no external dependencies. Check with
+`cargo tree -p tpt-strata`. The two crates are released together and share a
+version number. Per-crate details are in the
+[core README](crates/tpt-strata/README.md) and the
+[Parquet README](crates/tpt-strata-parquet/README.md).
+
 ## Quick Start
 
 ```rust

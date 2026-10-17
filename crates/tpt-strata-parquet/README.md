@@ -160,13 +160,15 @@ cargo run -p tpt-strata-parquet --example read_parquet -- path/to/file.parquet
 ```
 
 The integration tests in `tests/import.rs` write fixtures with `ArrowWriter`
-and cover typed columns with nulls, querying an imported table, rejection of
-unsupported types, a missing file, a zero-row file, and multiple row groups.
+and cover typed columns with nulls, querying an imported table, widening of
+small integer and float types, rejection of unsupported types, round trips
+through `write_parquet`, reads from in-memory bytes, a missing file, a zero-row
+file, and multiple row groups.
 
 ## Minimum supported Rust version
 
-Rust **1.75**, the same as the core crate. CI checks this with a pinned
-toolchain.
+Rust **1.88**, set by `rust-version` in `Cargo.toml`. The core crate needs
+1.75, but Arrow and Parquet 60, which this crate depends on, need 1.88.
 
 ## Related crates and docs
 

@@ -12,6 +12,8 @@ keywords = ["columnar", "query-engine", "sql", "embeddable", "analytics"]
 categories = ["database", "data-structures", "parser-implementations"]
 readme = "README.md"
 documentation = "https://docs.rs/tpt-strata"
+# Profiling tool for maintainers; it stays in the repo but is not packaged.
+exclude = ["examples/profile_q4.rs"]
 
 [package.metadata.docs.rs]
 all-features = true

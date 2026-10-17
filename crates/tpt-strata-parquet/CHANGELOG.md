@@ -11,29 +11,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this crate follows [Semantic Versioning](https://semver.org/).
 
 ## [0.1.0] - unreleased
+### Added
+
+- `write_parquet(&table, path)`: writes a table with the same four native types
+  it reads, so files round-trip.
+
+- `read_parquet_columns(path, &[names])`: reads only the named columns, so a
+  file with an unsupported column can still be read.
+
+- `read_parquet_bytes(bytes)`: reads Parquet data already in memory.
+
+- Runnable example `examples/read_parquet.rs`. With no argument it writes a
+  small sample file to the temp directory and reads it back, so it runs out of
+  the box. Pass a path to read your own file.
 
 ### Changed
 
 - **Minimum Rust version is 1.88** (was 1.85). Arrow and Parquet are updated
   from 55 to 60, which need it. Gzip pages use the pure-Rust `zlib-rs` backend.
+
 - **Behavior change:** supported types are wider. `INT8`, `INT16`, `UINT8`,
   `UINT16`, `UINT32`, `FLOAT`, `LARGE_STRING`, `STRING_VIEW`, `DATE32` and
-  `TIMESTAMP` are imported (widened to `i32`, `i64`, `f64` or `str`). Dates and
-  timestamps keep their raw numbers. Binary and `UINT64` are still rejected.
+  `TIMESTAMP` are imported (widened to `i32`, `i64`, `f64` or `str`). `DATE32` and `TIMESTAMP` import as
+  native `Date` and `Timestamp` values. A zone-aware timestamp is read as UTC.
+  Binary and `UINT64` are still rejected.
+
 - Errors are split by kind. A file that cannot be opened or written is
   `QueryError::Io` (with `source()`). A file that cannot be decoded is
   `QueryError::Import`. Unsupported column types stay `UnsupportedOperation`.
-
-### Added
-
-- `write_parquet(&table, path)`: writes a table with the same four native types
-  it reads, so files round-trip.
-- `read_parquet_columns(path, &[names])`: reads only the named columns, so a
-  file with an unsupported column can still be read.
-- `read_parquet_bytes(bytes)`: reads Parquet data already in memory.
-- Runnable example `examples/read_parquet.rs`. With no argument it writes a
-  small sample file to the temp directory and reads it back, so it runs out of
-  the box. Pass a path to read your own file.
 
 ## Pre-release history
 

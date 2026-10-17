@@ -57,8 +57,12 @@ workflow. Nothing is tagged or published.
 - [x] `cargo package --list -p tpt-strata` and `-p tpt-strata-parquet`: no
       stray files. Sources, tests, examples, benches, README, CHANGELOG and
       licenses only.
-- [x] `cargo doc` builds with warnings as errors, and no "v1" wording is
-      left in the published sources or READMEs. Still worth a read-through.
+- [x] `cargo doc` builds with warnings as errors.
+- [ ] No "v1" wording left in the published sources or READMEs. Still open:
+      `ARCHITECTURE.md`, `docs/scope.md`, and the doc comments in
+      `crates/tpt-strata/tests/integration.rs` and `tests/regressions.rs`.
+      The changelogs and READMEs are clean; the pre-release history keeps its
+      old wording on purpose.
 - [ ] Run the Release check workflow by hand (Actions, `workflow_dispatch`).
 
 ## 3. Publish (permanent: a published version cannot be deleted)
@@ -69,8 +73,6 @@ workflow. Nothing is tagged or published.
 - [ ] Wait until `cargo search tpt-strata` shows 0.1.0.
 - [ ] `cargo publish --dry-run -p tpt-strata-parquet`, then
       `cargo publish -p tpt-strata-parquet`.
-- [ ] Add a co-owner on crates.io (a second maintainer or the org team), so
-      the crates are not tied to one account.
 
 ## 4. After publishing
 
@@ -99,3 +101,15 @@ workflow. Nothing is tagged or published.
 - 2026-10-18: prep done. Local checks: fmt, clippy (`-D warnings`), 260
   workspace tests, Rust 1.75 core and serde tests, Rust 1.88 workspace build,
   rustdoc, Python tests (18), `cargo publish --dry-run -p tpt-strata`.
+- 2026-10-18: pre-publish pass. `cargo publish --dry-run -p tpt-strata` passes
+  (with `--allow-dirty`, since the tree is uncommitted; the real run needs a
+  clean tree). `tpt-strata-parquet` fails as expected: no `tpt-strata` on
+  crates.io yet. Changelogs: one `0.1.0` section per file (duplicate headers
+  merged), the diagnostics entry now lists the constructs still rejected
+  (`CAST`, `COUNT(DISTINCT)`, other functions), and the Parquet changelog says
+  dates import as native types. READMEs: data model and error table cover
+  Date, Timestamp, Io and Import; Parquet MSRV is 1.88. Still open: CI status
+  (not checked, `gh` is not installed here), and `examples/profile_q4.rs` plus
+  `examples/data/*.csv` ship in the core package. Fixed: `profile_q4.rs` is
+  now excluded from the package (`exclude` in the core `Cargo.toml`); the CSV
+  data stays because a shipped example uses it. Packaged core is 55 files.

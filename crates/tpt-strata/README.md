@@ -223,9 +223,6 @@ construct and points at [`docs/scope.md`](https://github.com/tpt-solutions/tpt-s
 Each one is easy to express in the supported subset. The scope document
 records the reasoning and the rewrite for each.
 
-Each one is easy to express in the supported subset. The scope document
-records the reasoning and the rewrite for each.
-
 ## Joins
 
 Two forms are available:
@@ -251,7 +248,9 @@ Every failure is a `QueryError`:
 | `MissingColumn { column, available }` | A column name does not exist. The message lists the available columns and suggests the closest match. |
 | `TypeMismatch { column, expected, actual, context }` | An operation does not fit the column's type, for example `SUM` on a string column. |
 | `UnsupportedOperation { message }` | The operation is not supported at this layer. |
-| `Sql { message }` | The SQL string is malformed, or uses a deferred construct. |
+| `Sql { message }` | The SQL string is malformed, or uses a construct outside the subset. |
+| `Io { context, source }` | A file cannot be opened, read or written. `source()` returns the OS error. |
+| `Import { message }` | A file's contents cannot be decoded. |
 
 Run `cargo run -p tpt-strata --example diagnostics` to print every variant.
 The exact wording is pinned by snapshot tests in `tests/diagnostics.rs`.
@@ -260,8 +259,8 @@ The exact wording is pinned by snapshot tests in `tests/diagnostics.rs`.
 
 | Type | Meaning |
 |---|---|
-| `DataType` | `Boolean`, `Int32`, `Int64`, `Float64`, `Utf8`. |
-| `Scalar` | One value: `Null`, `Bool`, `I32`, `I64`, `F64`, `Str`. |
+| `DataType` | `Boolean`, `Int32`, `Int64`, `Float64`, `Utf8`, `Date`, `Timestamp`. |
+| `Scalar` | One value: `Null`, `Bool`, `I32`, `I64`, `F64`, `Str`, `Date`, `Timestamp`. |
 | `Field` / `Schema` | A named, typed, nullable column description and an ordered list of fields. |
 | `Column` | A named vector of `Scalar` values, used to build a `Table`. |
 | `Table` | Schema plus one or more `Batch`es. |
