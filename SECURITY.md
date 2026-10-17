@@ -12,7 +12,7 @@ Only the latest release receives security fixes.
 ## Reporting a Vulnerability
 
 Please report suspected security vulnerabilities privately to the project
-maintainers before disclosing them publicly.
+maintainers before disclosing them publicly..
 
 - Use GitHub's private vulnerability reporting for this repository:
   <https://github.com/tpt-solutions/tpt-strata/security/advisories/new>
