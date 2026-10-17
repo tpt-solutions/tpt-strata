@@ -3,7 +3,7 @@ name = "tpt-strata-python"
 description = "Python bindings for tpt-strata: SQL over tables, CSV and Parquet, from Python"
 # Not inherited from the workspace: this crate is excluded from it, because
 # building the Python extension needs its own feature set.
-version = "1.0.1"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -21,6 +21,6 @@ name = "_native"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
-tpt-strata-parquet = { version = "=1.0.1", path = "../tpt-strata-parquet" }
+tpt-strata = { version = "=0.1.0", path = "../tpt-strata" }
+tpt-strata-parquet = { version = "=0.1.0", path = "../tpt-strata-parquet" }
 pyo3 = "0.29"

@@ -8,7 +8,7 @@ the Parquet bridge) are recorded in the [root changelog](../../CHANGELOG.md).
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this crate follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - unreleased
 
 ### Added
 
@@ -114,7 +114,7 @@ this crate follows [Semantic Versioning](https://semver.org/).
   `OR`, parentheses, `IS NULL`/`IS NOT NULL`, `IN`, `BETWEEN`, `LIKE`,
   `DISTINCT`, `HAVING`, `LEFT`/`OUTER` joins, multiple joins, and
   column-to-column comparisons each get a message naming the construct and
-  pointing at `docs/v1.1-scope.md`. Snapshot tests in `tests/diagnostics.rs`.
+  pointing at `docs/scope.md`. Snapshot tests in `tests/diagnostics.rs`.
 - Runnable examples: `examples/basic_query.rs` (builder API),
   `examples/sql_query.rs` (SQL, including JOIN), and `examples/diagnostics.rs`
   (every `QueryError` variant).
@@ -127,9 +127,14 @@ this crate follows [Semantic Versioning](https://semver.org/).
   above its WHERE clause. The filter now keeps one column so the row count
   survives.
 
-## [1.0.1] - 2026-09-11
+## Pre-release history
 
-### Fixed
+Internal milestones. They were never published to crates.io, and their
+changes ship in 0.1.0.
+
+### 1.0.1 (internal, 2026-09-11)
+
+#### Fixed
 
 - `COUNT(col)` no longer counts `NULL` rows. `COUNT(*)` still counts every row;
   an engine-level `count_star` flag distinguishes the two.
@@ -143,13 +148,13 @@ this crate follows [Semantic Versioning](https://semver.org/).
 - `JOIN ... ON` no longer matches `NULL` keys (`NULL = NULL` no longer matches),
   matching SQL semantics.
 
-### Added
+#### Added
 
 - Regression tests covering all of the above (`tests/fixes.rs`).
 
-## [1.0.0] - 2026-09-11
+### 1.0.0 (internal, 2026-09-11)
 
-### Added
+#### Added
 
 - Native columnar in-memory format: `DataType` (`Boolean`, `Int32`, `Int64`,
   `Float64`, `Utf8`), nullable arrays, and `Schema`/`Field`/`Batch`.
@@ -172,6 +177,4 @@ this crate follows [Semantic Versioning](https://semver.org/).
 - Rustdoc with runnable doctests for the builder API and `SqlContext`.
 - Zero external dependencies, re-verified with `cargo tree`.
 
-[Unreleased]: https://github.com/tpt-solutions/tpt-strata/compare/v1.0.1...HEAD
-[1.0.1]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v1.0.1
-[1.0.0]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v1.0.0
+[0.1.0]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v0.1.0

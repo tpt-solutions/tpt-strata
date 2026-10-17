@@ -490,7 +490,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("- rows (facts): {rows}, dims: 1000");
     println!("- timed runs per query: {RUNS} (after one warm-up), median reported");
     println!("- logical CPUs: {cpus}");
-    println!("- tpt-strata 1.0.1 (path dependency, {TPT_BUILD}), DataFusion 55.2, DuckDB 1.10501");
+    println!("- tpt-strata 0.1.0 (path dependency, {TPT_BUILD}), DataFusion 55.2, DuckDB 1.10501");
 
     let dir: PathBuf = std::env::temp_dir().join("tpt-strata-compare");
     std::fs::create_dir_all(&dir)?;

@@ -9,7 +9,7 @@ Each crate also keeps its own changelog, with only the changes that affect it:
 [`tpt-strata-parquet`](crates/tpt-strata-parquet/CHANGELOG.md). This file
 records workspace-wide changes (CI, docs, licensing, and release-level notes).
 
-## [Unreleased]
+## [0.1.0] - unreleased
 
 ### Changed
 
@@ -127,13 +127,13 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
   `OR`, parentheses, `IS NULL`/`IS NOT NULL`, `IN`, `BETWEEN`, `LIKE`,
   `DISTINCT`, `HAVING`, `LEFT`/`OUTER` joins, multiple joins, and
   column-to-column comparisons each get a message naming the construct and
-  pointing at `docs/v1.1-scope.md`. Snapshot tests in `tests/diagnostics.rs`.
+  pointing at `docs/scope.md`. Snapshot tests in `tests/diagnostics.rs`.
 - Runnable examples: `examples/basic_query.rs` (builder),
   `examples/sql_query.rs` (SQL incl. JOIN), `examples/diagnostics.rs` (every
   `QueryError` variant), and
   `crates/tpt-strata-parquet/examples/read_parquet.rs` (bridge, with a
   self-generating sample file).
-- `docs/v1.1-scope.md` — deliberate scope decisions for deferred SQL
+- `docs/scope.md` — deliberate scope decisions for deferred SQL
   features, data types, and forward-looking ideas.
 - `docs/integration-recipe.md` — a template for wiring tpt-strata into a
   struct-backed store (for tpt-keystone-db, tpt-aion, tpt-cloud-observability).
@@ -144,9 +144,14 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 - `ARCHITECTURE.md` documents that `Sort`/`Join` fully materialize in memory
   (no streaming/spill).
 
-## [1.0.1] - 2026-09-11
+## Pre-release history
 
-### Fixed
+Internal milestones. They were never published to crates.io, and their
+changes ship in 0.1.0.
+
+### 1.0.1 (internal, 2026-09-11)
+
+#### Fixed
 
 - `COUNT(col)` no longer counts `NULL` rows; `COUNT(*)` still counts every
   row (engine-level `count_star` flag distinguishes the two).
@@ -161,15 +166,15 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 - `JOIN ... ON` no longer matches `NULL` keys (`NULL = NULL` no longer
   matches), matching SQL semantics.
 
-### Added
+#### Added
 
 - Regression tests covering all of the above (`tests/fixes.rs`).
 
-## [1.0.0] - 2026-09-11
+### 1.0.0 (internal, 2026-09-11)
 
-### Added
+#### Added
 
-#### Core (`tpt-strata`)
+##### Core (`tpt-strata`)
 
 - Native columnar in-memory format: `DataType` (`Boolean`, `Int32`, `Int64`,
   `Float64`, `Utf8`), nullable arrays, `Schema`/`Field`/`Batch`.
@@ -192,7 +197,7 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 - Full rustdoc with runnable doctests for the builder API and `SqlContext`.
 - Zero external dependencies (re-verified via `cargo tree`).
 
-#### Bridge (`tpt-strata-parquet`)
+##### Bridge (`tpt-strata-parquet`)
 
 - Parquet import bridge: `read_parquet(path)` reads a Parquet file into a
   `tpt_strata::Table`.
@@ -203,7 +208,7 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
 - Tests using `ArrowWriter` to generate Parquet fixtures in a temp directory,
   with round-trip, unsupported-type, zero-row, and multi-row-group coverage.
 
-#### Workspace and CI
+##### Workspace and CI
 
 - MIT/Apache-2.0 dual license (Copyright (c) TPT Solutions).
 - CI (GitHub Actions): fmt check, clippy `-D warnings`, `test --all`,
@@ -215,5 +220,4 @@ records workspace-wide changes (CI, docs, licensing, and release-level notes).
   incumbent comparison records.
 - `CONTRIBUTING.md`, `SECURITY.md`.
 
-[1.0.1]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v1.0.1
-[1.0.0]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v1.0.0
+[0.1.0]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v0.1.0

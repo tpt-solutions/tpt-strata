@@ -19,5 +19,5 @@ name = "strata"
 path = "src/main.rs"
 
 [dependencies]
-tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
-tpt-strata-parquet = { version = "=1.0.1", path = "../tpt-strata-parquet" }
+tpt-strata = { version = "=0.1.0", path = "../tpt-strata" }
+tpt-strata-parquet = { version = "=0.1.0", path = "../tpt-strata-parquet" }

@@ -6,5 +6,5 @@ publish = false
 
 [dependencies]
 # Inside this repository, depend on the checkout. In your own project, use the
-# published version once tpt-strata is on crates.io: tpt-strata = "1.0"
+# published version once tpt-strata is on crates.io: tpt-strata = "0.1"
 tpt-strata = { path = "../../crates/tpt-strata" }

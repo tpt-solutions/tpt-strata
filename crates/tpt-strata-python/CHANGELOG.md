@@ -10,7 +10,7 @@ in the [root changelog](../../CHANGELOG.md), and engine changes are in the
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this package follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - unreleased
 
 ### Added
 

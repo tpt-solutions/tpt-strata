@@ -1,6 +1,7 @@
 # Publishing
 
-How to release the tpt-strata crates to crates.io.
+How to release the tpt-strata crates to crates.io. Each release also gets a
+tracking file, such as [RELEASE-0.1.0.md](RELEASE-0.1.0.md).
 
 Written for maintainers who cut releases.
 
@@ -21,7 +22,7 @@ The other crates set `publish = false` and are not released to crates.io:
 ## Before you start
 
 1. Confirm the version is the same in `[workspace.package]` in the root
-   `Cargo.toml`, and in the `=1.0.1` pins in each crate's dependencies.
+   `Cargo.toml`, and in the `=<version>` pins in each crate's dependencies.
 2. Move the `[Unreleased]` entries in the root `CHANGELOG.md` and in the
    per-crate changelogs to the new version and today's date.
 3. Make sure the working tree is clean and CI is green on `master`.

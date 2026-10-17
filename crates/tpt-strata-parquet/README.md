@@ -42,8 +42,8 @@ for the full rule.
 
 ```toml
 [dependencies]
-tpt-strata = "1.0"
-tpt-strata-parquet = "1.0"
+tpt-strata = "0.1"
+tpt-strata-parquet = "0.1"
 ```
 
 Both crates are released together and share a version number. The bridge pins

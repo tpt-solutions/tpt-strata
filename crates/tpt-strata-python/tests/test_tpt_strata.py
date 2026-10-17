@@ -129,7 +129,7 @@ class QueryTests(unittest.TestCase):
             strata.check(tables(), "SELECT order_id FROM nowhere")
 
     def test_version_is_exported(self):
-        self.assertEqual(strata.__version__, "1.0.1")
+        self.assertEqual(strata.__version__, "0.1.0")
 
 
 if __name__ == "__main__":

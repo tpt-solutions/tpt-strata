@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tpt-strata"
-version = "1.0.1"
+version = "0.1.0"
 description = "Embeddable columnar SQL over CSV, Parquet and Python rows, with zero-dependency Rust core"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }

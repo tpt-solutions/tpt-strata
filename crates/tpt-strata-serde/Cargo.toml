@@ -16,7 +16,7 @@ documentation = "https://docs.rs/tpt-strata-serde"
 publish = false
 
 [dependencies]
-tpt-strata = { version = "=1.0.1", path = "../tpt-strata" }
+tpt-strata = { version = "=0.1.0", path = "../tpt-strata" }
 serde = { version = "1", default-features = false, features = ["std"] }
 
 [dev-dependencies]

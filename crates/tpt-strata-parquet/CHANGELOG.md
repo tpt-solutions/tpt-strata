@@ -10,7 +10,7 @@ in the [root changelog](../../CHANGELOG.md), and core engine changes are in the
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this crate follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - unreleased
 
 ### Changed
 
@@ -35,16 +35,21 @@ this crate follows [Semantic Versioning](https://semver.org/).
   small sample file to the temp directory and reads it back, so it runs out of
   the box. Pass a path to read your own file.
 
-## [1.0.1] - 2026-09-11
+## Pre-release history
 
-### Changed
+Internal milestones. They were never published to crates.io, and their
+changes ship in 0.1.0.
+
+### 1.0.1 (internal, 2026-09-11)
+
+#### Changed
 
 - Version bump in lockstep with `tpt-strata` 1.0.1. The bridge's own code did
   not change. The fixes in that release are in the core crate.
 
-## [1.0.0] - 2026-09-11
+### 1.0.0 (internal, 2026-09-11)
 
-### Added
+#### Added
 
 - Parquet import bridge: `read_parquet(path)` reads a Parquet file into a
   `tpt_strata::Table`.
@@ -56,6 +61,4 @@ this crate follows [Semantic Versioning](https://semver.org/).
   `ArrowWriter` in a temp directory. They cover round-trip reads, unsupported
   types, zero-row files, and multi-row-group files.
 
-[Unreleased]: https://github.com/tpt-solutions/tpt-strata/compare/v1.0.1...HEAD
-[1.0.1]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v1.0.1
-[1.0.0]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v1.0.0
+[0.1.0]: https://github.com/tpt-solutions/tpt-strata/releases/tag/v0.1.0
