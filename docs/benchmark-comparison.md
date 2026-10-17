@@ -1433,3 +1433,21 @@ a job, not lock contention. A sampling profile counts waiting threads as well as
 busy ones, so a pool's idle threads inflate the libc share. When reading a profile
 of this crate, look at the busy threads, or at the samples inside the crate's
 own functions.
+
+### The parallel filter's jobs, measured inside (2026-10-18)
+
+Timings taken inside the filter's pool jobs (temporary, removed), for the
+integer filter over 1M rows, parallel build. Each job covers 50K rows, and
+about 47% pass:
+
+| measurement | value |
+|---|---|
+| time for one job | 370–700 µs, so 7–14 ns per row |
+| time for the whole filter, wall | about 1.3 ms |
+
+The jobs run in parallel, so the wall time is one job's duration plus a little
+overhead. The per-row work is the cost. A branch-free job body, which writes
+every row index and advances only on a match, changed the job times by no more
+than the noise (283–648 µs). So the branch on the match is not the cost. The
+remaining per-row work is the predicate test and its iteration over the
+predicates. Reverted; the tree is unchanged.
