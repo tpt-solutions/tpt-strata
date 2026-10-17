@@ -5,6 +5,7 @@
     python -m unittest discover -s tests -v
 """
 
+import datetime
 import os
 import tempfile
 import unittest
@@ -41,6 +42,21 @@ class TableTests(unittest.TestCase):
     def test_from_csv_missing_file_raises_file_not_found(self):
         with self.assertRaises(FileNotFoundError):
             strata.Table.from_csv("/no/such/file.csv")
+
+    def test_dates_and_timestamps_round_trip_as_datetime_values(self):
+        rows = [
+            (datetime.date(2026, 2, 10), datetime.datetime(2026, 2, 10, 12, 30, 0, 500000)),
+            (datetime.date(1969, 12, 31), datetime.datetime(1969, 12, 31, 23, 59, 59)),
+        ]
+        t = strata.Table.from_rows(["day", "at"], [list(r) for r in rows])
+        self.assertEqual(t.to_rows(), rows)
+        result = strata.sql({"t": t}, "SELECT day FROM t WHERE day >= DATE '2026-01-01'")
+        self.assertEqual(result.to_rows(), [(datetime.date(2026, 2, 10),)])
+
+    def test_datetime_with_time_zone_is_rejected(self):
+        aware = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        with self.assertRaises(ValueError):
+            strata.Table.from_rows(["at"], [[aware]])
 
     def test_from_rows_accepts_python_values(self):
         t = strata.Table.from_rows(

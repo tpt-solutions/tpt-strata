@@ -12,7 +12,7 @@
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyInt, PyTuple};
+use pyo3::types::{PyBool, PyDate, PyDateTime, PyDict, PyInt, PyTuple};
 use tpt_strata::csv::{parse_csv, to_csv};
 use tpt_strata::format::render_table;
 use tpt_strata::sql::SqlContext;
@@ -56,6 +56,27 @@ fn py_to_scalar(v: &Bound<'_, PyAny>) -> PyResult<Scalar> {
             .map(Scalar::I64)
             .map_err(|_| PyValueError::new_err("integer does not fit in a 64-bit signed value"));
     }
+    // datetime is a subclass of date, so it is checked first.
+    if v.is_instance_of::<PyDateTime>() {
+        if !v.getattr("tzinfo")?.is_none() {
+            return Err(PyValueError::new_err(
+                "datetime has a time zone; tpt-strata timestamps have none, so pass a naive datetime",
+            ));
+        }
+        let epoch = PyDateTime::new(v.py(), 1970, 1, 1, 0, 0, 0, 0, None)?;
+        let delta = v.sub(epoch)?;
+        let days: i64 = delta.getattr("days")?.extract()?;
+        let seconds: i64 = delta.getattr("seconds")?.extract()?;
+        let micros: i64 = delta.getattr("microseconds")?.extract()?;
+        return Ok(Scalar::Timestamp(
+            (days * 86_400 + seconds) * 1_000_000 + micros,
+        ));
+    }
+    if v.is_instance_of::<PyDate>() {
+        // 719163 is the proleptic Gregorian ordinal of 1970-01-01.
+        let ordinal: i64 = v.call_method0("toordinal")?.extract()?;
+        return Ok(Scalar::Date((ordinal - 719_163) as i32));
+    }
     if let Ok(f) = v.extract::<f64>() {
         return Ok(Scalar::F64(f));
     }
@@ -63,7 +84,7 @@ fn py_to_scalar(v: &Bound<'_, PyAny>) -> PyResult<Scalar> {
         return Ok(Scalar::Str(s));
     }
     Err(PyTypeError::new_err(format!(
-        "cannot store a value of type {} in a table; use None, bool, int, float or str",
+        "cannot store a value of type {} in a table; use None, bool, int, float, str, date or datetime",
         v.get_type().name()?
     )))
 }
@@ -76,6 +97,21 @@ fn scalar_to_py(py: Python<'_>, s: Scalar) -> PyResult<Py<PyAny>> {
         Scalar::I64(n) => n.into_pyobject(py)?.into_any().unbind(),
         Scalar::F64(f) => f.into_pyobject(py)?.into_any().unbind(),
         Scalar::Str(s) => s.into_pyobject(py)?.into_any().unbind(),
+        // Built by adding a timedelta to the epoch, so dates before 1970 work
+        // and a value outside Python's range raises OverflowError.
+        Scalar::Date(days) => {
+            let dt = py.import("datetime")?;
+            let epoch = dt.getattr("date")?.call1((1970, 1, 1))?;
+            let delta = dt.getattr("timedelta")?.call1((days,))?;
+            epoch.add(delta)?.unbind()
+        }
+        // A naive datetime, because a tpt-strata timestamp has no time zone.
+        Scalar::Timestamp(micros) => {
+            let dt = py.import("datetime")?;
+            let epoch = dt.getattr("datetime")?.call1((1970, 1, 1))?;
+            let delta = dt.getattr("timedelta")?.call1((0, 0, micros))?;
+            epoch.add(delta)?.unbind()
+        }
     })
 }
 
@@ -121,11 +157,7 @@ impl PyTable {
     /// Build a table from column names and a list of rows. Every row must have
     /// one value per name. A column with only None values cannot be typed.
     #[staticmethod]
-    fn from_rows(
-        py: Python<'_>,
-        names: Vec<String>,
-        rows: Vec<Vec<Py<PyAny>>>,
-    ) -> PyResult<Self> {
+    fn from_rows(py: Python<'_>, names: Vec<String>, rows: Vec<Vec<Py<PyAny>>>) -> PyResult<Self> {
         let mut data = Vec::with_capacity(rows.len());
         for row in &rows {
             let mut values = Vec::with_capacity(row.len());
