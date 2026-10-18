@@ -13,7 +13,8 @@ homepage = "https://github.com/tpt-solutions/tpt-strata"
 keywords = ["sql", "python", "columnar", "parquet", "tpt-strata"]
 categories = ["database", "development-tools::ffi"]
 readme = "README.md"
-# Not yet released. Remove this line when the package is ready to publish.
+# Not for crates.io. The Python package is released to PyPI with maturin.
+# Keep this line.
 publish = false
 
 [lib]

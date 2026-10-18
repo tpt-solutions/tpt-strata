@@ -67,12 +67,12 @@ workflow. Nothing is tagged or published.
 
 ## 3. Publish (permanent: a published version cannot be deleted)
 
-- [ ] `cargo login` with a crates.io token from an account that should own
+- [x] `cargo login` with a crates.io token from an account that should own
       the crates.
-- [ ] `cargo publish -p tpt-strata`
-- [ ] Wait until `cargo search tpt-strata` shows 0.1.0.
-- [ ] `cargo publish --dry-run -p tpt-strata-parquet`, then
-      `cargo publish -p tpt-strata-parquet`.
+- [x] `cargo publish -p tpt-strata` (2026-10-18, published).
+- [x] Wait until `cargo search tpt-strata` shows 0.1.0.
+- [x] `cargo publish --dry-run -p tpt-strata-parquet`, then
+      `cargo publish -p tpt-strata-parquet` (2026-10-18, published).
 
 ## 4. After publishing
 
@@ -101,6 +101,10 @@ workflow. Nothing is tagged or published.
 - 2026-10-18: prep done. Local checks: fmt, clippy (`-D warnings`), 260
   workspace tests, Rust 1.75 core and serde tests, Rust 1.88 workspace build,
   rustdoc, Python tests (18), `cargo publish --dry-run -p tpt-strata`.
+- 2026-10-18: published `tpt-strata` 0.1.0 and `tpt-strata-parquet` 0.1.0 to
+  crates.io, both from a clean dry run first. Changelog dates set to
+  2026-10-18; quickstart now uses the published crates. Not yet done: tag,
+  GitHub release, docs.rs and badge checks, announcements.
 - 2026-10-18: pre-publish pass. `cargo publish --dry-run -p tpt-strata` passes
   (with `--allow-dirty`, since the tree is uncommitted; the real run needs a
   clean tree). `tpt-strata-parquet` fails as expected: no `tpt-strata` on

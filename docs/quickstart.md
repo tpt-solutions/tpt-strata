@@ -2,18 +2,22 @@
 
 About five minutes, from nothing installed to a query over your own data.
 
-tpt-strata is not on crates.io yet, so depend on it by path or by git for now.
-From a checkout of this repository:
+Add the crate to your project:
 
-```toml
-# Cargo.toml of your project
-[dependencies]
-tpt-strata = { path = "../tpt-strata/crates/tpt-strata" }
+```sh
+cargo add tpt-strata
 # Only if you read or write Parquet:
-tpt-strata-parquet = { path = "../tpt-strata/crates/tpt-strata-parquet" }
+cargo add tpt-strata-parquet
 ```
 
-Once published, this becomes `cargo add tpt-strata`.
+Or, in your `Cargo.toml`:
+
+```toml
+[dependencies]
+tpt-strata = "0.1"
+# Only if you read or write Parquet:
+tpt-strata-parquet = "0.1"
+```
 
 ## 1. Query rows from Rust
 

@@ -8,7 +8,7 @@ the Parquet bridge) are recorded in the [root changelog](../../CHANGELOG.md).
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this crate follows [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-18
 ### Added
 
 - SQL: `NOT`, `NOT IN` and `NOT BETWEEN`. `NOT` is pushed down to the

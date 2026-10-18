@@ -10,7 +10,7 @@ in the [root changelog](../../CHANGELOG.md), and core engine changes are in the
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this crate follows [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-18
 ### Added
 
 - `write_parquet(&table, path)`: writes a table with the same four native types

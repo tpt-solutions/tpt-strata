@@ -15,9 +15,14 @@ crate depends on the core crate:
 | 1     | `tpt-strata`           | Core engine. Zero external dependencies |
 | 2     | `tpt-strata-parquet`   | Parquet bridge. Needs `tpt-strata` on crates.io first |
 
-The other crates set `publish = false` and are not released to crates.io:
-`tpt-strata-cli`, `tpt-strata-serde`, `tpt-strata-wasm` and
-`tpt-strata-python`. The Python package is released through maturin instead.
+The other crates set `publish = false`. `tpt-strata-cli`, `tpt-strata-wasm`
+and `tpt-strata-python` are never released to crates.io: the CLI is installed
+from git or GitHub releases, the WASM build serves the playground, and the
+Python package is released to PyPI with maturin.
+
+`tpt-strata-serde` is the planned follow-up. It can be published as a 0.1.x
+release once a consumer team has used it. Before that, remove its
+`publish = false` line, add a changelog entry, and run the dry run.
 
 ## Before you start
 

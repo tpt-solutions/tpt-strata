@@ -11,7 +11,8 @@ homepage.workspace = true
 keywords = ["sql", "parquet", "csv", "cli", "tpt-strata"]
 categories = ["command-line-utilities", "database"]
 readme = "README.md"
-# Not yet released. Remove this line when the crate is ready to publish.
+# Not for crates.io. This is an end-user binary; install it from the git repo
+# or from GitHub releases. Keep this line.
 publish = false
 
 [[bin]]

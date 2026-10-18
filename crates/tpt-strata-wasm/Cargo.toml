@@ -11,7 +11,8 @@ homepage.workspace = true
 keywords = ["wasm", "sql", "columnar", "playground", "tpt-strata"]
 categories = ["wasm", "database"]
 readme = "README.md"
-# Not yet released. Remove this line when the crate is ready to publish.
+# Not for crates.io. This is the build behind the browser playground, not a
+# library for consumers. Keep this line.
 publish = false
 
 [lib]

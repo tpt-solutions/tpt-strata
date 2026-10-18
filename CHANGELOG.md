@@ -9,7 +9,7 @@ Each crate also keeps its own changelog, with only the changes that affect it:
 [`tpt-strata-parquet`](crates/tpt-strata-parquet/CHANGELOG.md). This file
 records workspace-wide changes (CI, docs, licensing, and release-level notes).
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-18
 ### Added
 
 - Native `DATE` and `TIMESTAMP` types, in the core crate and the Parquet
