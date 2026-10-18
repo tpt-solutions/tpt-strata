@@ -52,7 +52,7 @@ workflow. Nothing is tagged or published.
 
 ## 2. Verify
 
-- [ ] CI green on `master` after the prep commits.
+- [x] CI green on `master` after the prep commits (pushed as `d85079b`).
 - [x] `cargo publish --dry-run -p tpt-strata` passes (locally, 2026-10-18).
 - [x] `cargo package --list -p tpt-strata` and `-p tpt-strata-parquet`: no
       stray files. Sources, tests, examples, benches, README, CHANGELOG and

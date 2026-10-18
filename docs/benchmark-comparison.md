@@ -4,6 +4,27 @@ A head-to-head run of the same three queries on the same Parquet data, in one
 process per engine. The harness is `bench/compare`. It is a separate workspace,
 because DataFusion and DuckDB are large dependencies.
 
+## Current results
+
+Latest full run: 2026-10-17, 1,000,000 rows, parallel build (`--features parallel`),
+one run per query. Times are in milliseconds. The last column is DataFusion's time
+divided by tpt-strata's, so above 1 means tpt-strata is faster. Compare the
+ratios within the run, not the absolute times, since the machine varies by up to
+about 30% between runs.
+
+| query | tpt-strata (parallel) | DataFusion (all cores) | DataFusion ÷ tpt-strata |
+|---|---|---|---|
+| Q1 group by + 3 aggregates | 1.71 | 3.80 | 2.2× |
+| Q2 filter + sort + limit | 1.63 | 1.89 | 1.2× |
+| Q3 join + group by | 1.58 | 3.77 | 2.4× |
+| Q4 group by id (1M groups, HAVING keeps none) | 21.0 | 29.4 | 1.4× |
+| Q5 LIKE filter, count and sum | 3.02 | 2.80 | 0.9× |
+
+Q5 is the only query behind DataFusion in this run. On the driver's own data
+(`q5_same_data`) the gap is larger, about 3.3× (see "Global aggregates without a
+filter" below). The sections after this table are a dated log of how each number
+was reached. The older summary tables in "Result" are from earlier runs.
+
 ## Result
 
 All three engines return the same results on all three queries. Every
@@ -1451,3 +1472,33 @@ every row index and advances only on a match, changed the job times by no more
 than the noise (283–648 µs). So the branch on the match is not the cost. The
 remaining per-row work is the predicate test and its iteration over the
 predicates. Reverted; the tree is unchanged.
+
+### tpt-simd-vector spike (2026-10-18)
+
+A standalone check of whether the published `tpt-simd-vector` 0.1.1 (the
+backend of `tpt-simd`) helps the integer filter's kernel. It is not in the
+core crate, and this is not a change to the engine. The kernel is
+`quantity > 50` over 1M `i64` values, counting and summing the matches, on one
+thread. The median of 300 runs, three runs in a row:
+
+| variant | ms per run |
+|---|---|
+| scalar loop | 0.44–0.47 |
+| plain 8-lane loop, no crate (control) | 0.33–0.34 |
+| `tpt-simd-vector`, 8 lanes | 0.48–0.51 |
+
+All three give the same count and sum. The crate is slower than the control in
+every run (0.65–0.71×). The cause was not profiled. A likely reason is that
+the crate's `simd_gt` and `select` build each lane through `from_fn` and a
+mask type, which the plain loop does not do. The crate's own docs describe its
+operations as fixed-length lane loops that LLVM lowers, so it gives no speed-up
+over plain code by itself.
+
+The kernel is also small next to the engine. It takes about 0.3 to 0.5 ms per
+1M rows, against 2.4 to 4 ms for the whole integer filter, so even a faster
+kernel would not move the query by much. The engine's cost is in the row
+iteration and the materialisation, as the sections above show.
+
+Decision: the gate in todo 12e is not met. Its API is pre-1.0 and was published
+on 2026-10-17, and no measured kernel gains from explicit lanes. tpt-simd is not
+added to the core crate.
